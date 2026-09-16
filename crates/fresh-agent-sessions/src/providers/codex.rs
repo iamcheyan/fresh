@@ -360,6 +360,30 @@ mod tests {
     }
 
     #[test]
+    fn the_cwd_is_read_out_of_a_session_meta_envelope() {
+        // Codex wraps the first record rather than writing the fields flat:
+        // `{"timestamp":…,"type":"session_meta","payload":{"cwd":…}}`. Every
+        // fixture here used to be flat, so reading only top-level keys passed
+        // the tests and lost the cwd on every real transcript.
+        let home = tempfile::tempdir().expect("tempdir");
+        write_rollout(
+            home.path(),
+            ["2026", "05", "09"],
+            &format!("rollout-2026-05-09T00-00-00-{UUID}.jsonl"),
+            r#"{"timestamp":"2026-05-09T00:00:00Z","type":"session_meta","payload":{"id":"abc","cwd":"/srv/api","originator":"codex_cli_rs"}}"#,
+        );
+
+        let report = scan(&Machine::local(home.path()), 10);
+
+        assert_eq!(report.agent_sessions.len(), 1);
+        assert_eq!(
+            report.agent_sessions[0].cwd.as_deref(),
+            Some(Path::new("/srv/api")),
+            "the cwd lives under `payload`, not at the top level"
+        );
+    }
+
+    #[test]
     fn walks_date_shards_newest_first() {
         let home = tempfile::tempdir().expect("tempdir");
         for (year, month, day) in [

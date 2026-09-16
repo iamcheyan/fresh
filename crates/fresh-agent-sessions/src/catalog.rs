@@ -691,10 +691,17 @@ pub fn read_cwd_field(env: &Machine<'_>, path: &Path, fields: &[&str]) -> Option
     }
     let text = read_first_line(env, path, 64 * 1024)?;
     let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
-    for field in fields {
-        if let Some(found) = value.get(*field).and_then(serde_json::Value::as_str) {
-            if !found.is_empty() {
-                return Some(PathBuf::from(found));
+    // Some formats put the session's fields at the top level of the first
+    // record; others wrap them in an envelope. Codex's rollouts are the
+    // latter: `{"timestamp":…,"type":"session_meta","payload":{"cwd":…}}`.
+    // Reading only the top level loses the cwd on every such transcript.
+    let candidates = [Some(&value), value.get("payload")];
+    for object in candidates.into_iter().flatten() {
+        for field in fields {
+            if let Some(found) = object.get(*field).and_then(serde_json::Value::as_str) {
+                if !found.is_empty() {
+                    return Some(PathBuf::from(found));
+                }
             }
         }
     }
