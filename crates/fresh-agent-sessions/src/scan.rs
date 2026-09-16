@@ -276,9 +276,15 @@ mod tests {
             include_absent: true,
             ..ScanOptions::default()
         };
-        let env = Machine::over(
-            LocalTarget::at(home.path()).with_var("GOOSE_DATA_DIR", "/definitely/not/here"),
-        );
+        // Absolute *for the platform the test runs on*: a unix-shaped path is
+        // not absolute on Windows, and `dir_override` rightly ignores it, which
+        // would make this test assert nothing there.
+        let elsewhere = if crate::target::Platform::host() == crate::target::Platform::Windows {
+            "C:\\definitely\\not\\here"
+        } else {
+            "/definitely/not/here"
+        };
+        let env = Machine::over(LocalTarget::at(home.path()).with_var("GOOSE_DATA_DIR", elsewhere));
 
         let discovery = run(&env, &options);
 

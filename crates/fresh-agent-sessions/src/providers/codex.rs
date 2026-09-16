@@ -49,7 +49,7 @@ pub fn scan(env: &Machine<'_>, limit: usize) -> ToolReport {
     // name would claim provenance the variable never had — the one thing a
     // crate built on evidence must not do.
     match env.var("CODEX_HOME") {
-        Some(value) if Path::new(&value).is_absolute() => {
+        Some(value) if crate::target::is_absolute_on(env.platform(), &value) => {
             report
                 .evidence
                 .push(Evidence::env_var("CODEX_HOME", value.to_string()));
@@ -382,11 +382,14 @@ mod tests {
             .agent_sessions
             .iter()
             .map(|s| {
+                // Forward slashes so the shard assertions below read the same
+                // on Windows, where `display()` renders separators as `\`.
                 s.transcript
                     .as_ref()
                     .expect("transcript")
                     .display()
                     .to_string()
+                    .replace('\\', "/")
             })
             .collect();
         assert!(

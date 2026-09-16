@@ -71,6 +71,29 @@ impl Platform {
     }
 }
 
+/// Whether `value` is an absolute path *on `platform`*.
+///
+/// `Path::is_absolute` answers for the platform this binary was compiled for,
+/// which is the wrong question here: a scan runs against a target that need
+/// not share the host's path rules. A Windows editor scanning a Linux machine
+/// must still read `/var/data` as absolute, and a Linux editor scanning a
+/// Windows machine must still read `D:\\data` as absolute.
+pub fn is_absolute_on(platform: Platform, value: &str) -> bool {
+    if platform != Platform::Windows {
+        return value.starts_with('/');
+    }
+    let bytes = value.as_bytes();
+    // `\\server\share` (UNC), or a drive-qualified path like `C:\` or `C:/`.
+    // A bare `\foo` is relative to the current drive, so it is not absolute.
+    if value.starts_with("\\\\") {
+        return true;
+    }
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
 /// What a walked entry is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -244,7 +267,7 @@ pub fn dir_override(
 ) -> (PathBuf, Option<String>) {
     for name in names {
         if let Some(value) = target.env(name).filter(|value| !value.trim().is_empty()) {
-            if Path::new(&value).is_absolute() {
+            if is_absolute_on(target.platform(), &value) {
                 return (PathBuf::from(&value), Some((*name).to_string()));
             }
             tracing::debug!(
@@ -425,5 +448,111 @@ impl Target for MapTarget {
             .get(&command_key(program, args))
             .cloned()
             .ok_or_else(|| format!("{program}: no canned output"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absoluteness_follows_the_target_not_the_host() {
+        // The case that reached CI: a unix-absolute path judged by Windows
+        // rules is not absolute, so an override on a *Windows* target is
+        // rightly ignored — but the same value on a Linux target must be
+        // honoured no matter which platform the scanner itself runs on.
+        assert!(is_absolute_on(Platform::Linux, "/definitely/not/here"));
+        assert!(is_absolute_on(Platform::MacOs, "/Users/x"));
+        assert!(!is_absolute_on(Platform::Windows, "/definitely/not/here"));
+
+        // And the mirror image: a Windows path is absolute for a Windows
+        // target however the scanning host spells its own paths.
+        assert!(is_absolute_on(Platform::Windows, "C:\\data"));
+        assert!(is_absolute_on(Platform::Windows, "d:/data"));
+        assert!(is_absolute_on(Platform::Windows, "\\\\server\\share"));
+        assert!(!is_absolute_on(Platform::Linux, "C:\\data"));
+    }
+
+    /// A target that reports whatever platform and variable it is told to.
+    struct Remote {
+        platform: Platform,
+        var: (&'static str, &'static str),
+    }
+
+    impl Target for Remote {
+        fn name(&self) -> &str {
+            "remote"
+        }
+        fn home(&self) -> PathBuf {
+            PathBuf::from("/home/u")
+        }
+        fn walk(
+            &self,
+            _root: &Path,
+            _opts: &WalkOpts,
+            _cancel: &AtomicBool,
+        ) -> std::io::Result<Vec<Entry>> {
+            Ok(Vec::new())
+        }
+        fn read_prefix(&self, _path: &Path, _max_bytes: usize) -> std::io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        fn platform(&self) -> Platform {
+            self.platform
+        }
+        fn env(&self, name: &str) -> Option<String> {
+            (name == self.var.0).then(|| self.var.1.to_string())
+        }
+        fn stat(&self, _path: &Path) -> Option<Entry> {
+            None
+        }
+    }
+
+    #[test]
+    fn an_override_is_judged_by_the_targets_platform_not_the_scanners() {
+        // The scan runs here; the machine is over there. A Windows target's
+        // `D:\store` must be honoured, and a unix-shaped value on that same
+        // target ignored — neither answer may depend on the host running this.
+        let default = PathBuf::from("/default");
+
+        let windows = Remote {
+            platform: Platform::Windows,
+            var: ("STORE", "D:\\store"),
+        };
+        assert_eq!(
+            dir_override(&windows, &["STORE"], default.clone()),
+            (PathBuf::from("D:\\store"), Some("STORE".to_string())),
+        );
+
+        let windows_given_unix_path = Remote {
+            platform: Platform::Windows,
+            var: ("STORE", "/store"),
+        };
+        assert_eq!(
+            dir_override(&windows_given_unix_path, &["STORE"], default.clone()),
+            (default.clone(), None),
+            "a unix path is not absolute on Windows, so it is ignored"
+        );
+
+        let linux = Remote {
+            platform: Platform::Linux,
+            var: ("STORE", "/store"),
+        };
+        assert_eq!(
+            dir_override(&linux, &["STORE"], default),
+            (PathBuf::from("/store"), Some("STORE".to_string())),
+        );
+    }
+
+    #[test]
+    fn a_drive_relative_or_bare_relative_path_is_not_absolute() {
+        // `\foo` names the current drive, and `C:foo` the current directory on
+        // drive C — neither says where it is on its own.
+        assert!(!is_absolute_on(Platform::Windows, "\\foo"));
+        assert!(!is_absolute_on(Platform::Windows, "C:foo"));
+        assert!(!is_absolute_on(Platform::Windows, "C:"));
+        assert!(!is_absolute_on(Platform::Windows, ""));
+        assert!(!is_absolute_on(Platform::Linux, "relative/path"));
+        assert!(!is_absolute_on(Platform::Linux, ""));
     }
 }
