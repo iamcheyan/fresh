@@ -13,6 +13,7 @@
   },
   "files": [
     "lib/fresh.d.ts",
+    "lib/agent_catalog.ts",
     "lib/agent_scanner.ts",
     "lib/tmux_format.ts",
     "lib/finder.ts",
@@ -25,6 +26,7 @@
     "lib/virtual-buffer-factory.ts",
     "lib/widgets.ts",
     "agent_sessions.ts",
+    "agent_sessions_catalog.ts",
     "agent_sessions_tmux.ts",
     "asm-lsp.ts",
     "audit_mode.ts",
