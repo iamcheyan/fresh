@@ -18,7 +18,9 @@
  *     });
  */
 
-const editor = getEditor();
+// `getEditor()` is called inside the two functions that need it rather than
+// at module load, so the pure helpers below can be imported by a test with no
+// editor to talk to (see `tests/README.md`).
 
 /** How strongly a fact is believed. */
 export type Confidence = "exact" | "strong" | "likely" | "weak";
@@ -126,7 +128,7 @@ export interface AgentSessionsApi {
 
 /** The hub, or null when it is not loaded. */
 export function hub(): AgentSessionsApi | null {
-  return editor.getPluginApi("agent-sessions") as AgentSessionsApi | null;
+  return getEditor().getPluginApi("agent-sessions") as AgentSessionsApi | null;
 }
 
 /**
@@ -145,6 +147,7 @@ export function registerScanner(scanner: Scanner): void {
     api.registerScanner(scanner);
     return;
   }
+  const editor = getEditor();
   editor.on("plugins_loaded", () => {
     const late = hub();
     if (late) {
@@ -206,6 +209,54 @@ export function firstJsonRecord(text: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Parse up to `maxRecords` JSONL records from a header read.
+ *
+ * Not just the first line: a transcript's first record is often bookkeeping
+ * that carries an id but no working directory — Claude Code opens with a
+ * `queue-operation` — so a caller needs to read forward until it has what it
+ * wants.
+ *
+ * The budget is a record count rather than a byte count because a single
+ * record can legitimately be a megabyte (one tool result with a large stdout),
+ * and a byte budget would stop mid-record and find nothing. The last line of a
+ * truncated read is very likely a partial record; it simply fails to parse and
+ * is skipped, which is what any other unparseable line gets.
+ */
+export function jsonRecords(
+  text: string,
+  maxRecords = 32,
+): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const line of text.split("\n")) {
+    if (out.length >= maxRecords) break;
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (typeof parsed === "object" && parsed !== null) {
+        out.push(parsed as Record<string, unknown>);
+      }
+    } catch {
+      // A partial or non-JSON line is skipped, not fatal.
+    }
+  }
+  return out;
+}
+
+/** The first of `fields` present as a non-empty string across `records`,
+ *  looking inside a `payload` envelope as well as at the top level. */
+export function pickStringFrom(
+  records: Record<string, unknown>[],
+  fields: string[],
+): string | undefined {
+  for (const record of records) {
+    const found = pickString(record, fields);
+    if (found !== undefined) return found;
+  }
+  return undefined;
 }
 
 /** The first of `fields` present as a non-empty string, looking inside a
