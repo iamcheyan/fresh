@@ -784,14 +784,19 @@ pub trait FileSystem: Send + Sync {
     // Directory Walking
     // ========================================================================
 
-    /// Recursively walk a directory tree, invoking `on_file` for each file.
+    /// Recursively walk a directory tree, invoking `on_entry` for each entry
+    /// `opts` selects.
     ///
-    /// Skips hidden entries (dot-prefixed names) and directories whose
-    /// basename appears in `skip_dirs`.  The walk stops early when:
-    /// - `on_file` returns `false` (caller reached its limit), or
+    /// Skips directories whose basename appears in `opts.skip_dirs`, and
+    /// hidden entries (dot-prefixed names) unless `opts.include_hidden`.  The
+    /// walk stops early when:
+    /// - `on_entry` returns `false` (caller reached its limit),
+    /// - `opts.max_entries` entries have been reported, or
     /// - `cancel` is set to `true` (e.g. user closed the dialog).
     ///
-    /// `on_file` receives `(absolute_path, path_relative_to_root)`.
+    /// A directory that cannot be read — the root included — is skipped, not
+    /// reported as an error: a path that is simply not there yields an empty
+    /// walk.  `Err` is reserved for a failure of the walk itself.
     ///
     /// `skip_dirs` entries are **basenames** matched at every depth
     /// (e.g. `"node_modules"` skips every `node_modules` directory in the
@@ -1670,9 +1675,10 @@ impl FileSystem for StdFileSystem {
             // for directories with millions of entries.
             let iter = match std::fs::read_dir(&dir) {
                 Ok(it) => it,
-                // An unreadable root is the caller's problem; an unreadable
-                // subdirectory is not worth abandoning the walk over.
-                Err(err) if dir == root => return Err(err),
+                // An unreadable directory — the root included — is skipped
+                // rather than failing the walk. Callers rely on this: a store
+                // directory for a tool that is not installed simply is not
+                // there, and that is an empty result, not an error.
                 Err(_) => continue,
             };
 
@@ -2750,6 +2756,39 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_walk_of_a_missing_root_is_empty_rather_than_an_error() {
+        // `walk_files` has always reported a path that is not there as an
+        // empty walk, and callers depend on it: a store directory for a tool
+        // that is not installed is simply absent. The general `walk` it is now
+        // built on must keep that contract, not just the narrow wrapper.
+        let fs = StdFileSystem;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut seen = 0usize;
+
+        let result = fs.walk(
+            Path::new("/nonexistent/path/that/does/not/exist"),
+            &WalkOptions {
+                skip_dirs: &[],
+                include_hidden: true,
+                include_dirs: true,
+                max_depth: usize::MAX,
+                max_entries: usize::MAX,
+            },
+            &cancel,
+            &mut |_entry| {
+                seen += 1;
+                true
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "a missing root is an empty walk, not an error"
+        );
+        assert_eq!(seen, 0);
     }
 
     #[test]

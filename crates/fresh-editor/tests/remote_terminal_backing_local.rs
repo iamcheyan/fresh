@@ -31,7 +31,6 @@ use fresh::model::filesystem::{
 use portable_pty::{native_pty_system, PtySize};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 /// A filesystem that delegates to the local `StdFileSystem` but pretends to be
