@@ -397,6 +397,127 @@ mod tests {
         );
     }
 
+    /// The whole point of the [`crate::host`] port: a scan of a machine this
+    /// process has no filesystem access to.
+    ///
+    /// Nothing in this test exists on any disk. A provider that still reached
+    /// for `std::fs` would come back empty, so this is what keeps the port
+    /// honest as providers are added.
+    #[test]
+    fn a_scan_runs_against_a_host_with_no_filesystem_behind_it() {
+        use crate::host::testing::MapHost;
+        use std::sync::Arc;
+
+        let host = MapHost::default()
+            // Claude Code on the remote machine.
+            .with_file(
+                "/home/remote/.claude/projects/-srv-api/remote-sess.jsonl",
+                r#"{"sessionId":"remote-sess","cwd":"/srv/api","gitBranch":"deploy","version":"2.1.273"}"#,
+            )
+            // Codex, in its date-sharded layout.
+            .with_file(
+                "/home/remote/.codex/sessions/2026/05/01/rollout-2026-05-01T10-00-00-0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.jsonl",
+                r#"{"cwd":"/srv/api"}"#,
+            )
+            // And a Herdr workspace whose pane names the Claude session, so
+            // correlation has to work over the port too.
+            .with_file(
+                "/home/remote/.config/herdr/session.json",
+                r#"{"version":3,"workspaces":[{"id":"ws","identity_cwd":"/srv/api",
+                    "tabs":[{"panes":{"0":{"cwd":"/srv/api","managed_agent_kind":"claude",
+                    "agent_session":{"source":"claude","agent":"claude","kind":"id",
+                    "value":"remote-sess"}}}}]}]}"#,
+            );
+
+        let env = Env::fake("/unused-local-home").with_host(Arc::new(host));
+        assert!(env.is_remote());
+        assert_eq!(env.host_label(), "ssh://test-host");
+
+        let discovery = scan(&env);
+
+        let claude = discovery
+            .tools
+            .iter()
+            .find(|report| report.tool == ToolId::ClaudeCode)
+            .expect("claude report from the remote host");
+        assert_eq!(claude.agent_sessions.len(), 1);
+        assert_eq!(
+            claude.agent_sessions[0].cwd.as_deref(),
+            Some(std::path::Path::new("/srv/api"))
+        );
+        assert_eq!(
+            claude.agent_sessions[0].git_branch.as_deref(),
+            Some("deploy")
+        );
+
+        let codex = discovery
+            .tools
+            .iter()
+            .find(|report| report.tool == ToolId::CodexCli)
+            .expect("codex report from the remote host");
+        assert_eq!(codex.agent_sessions.len(), 1);
+
+        let exact: Vec<_> = discovery
+            .links
+            .iter()
+            .filter(|link| link.reason == LinkReason::RecordedSessionId)
+            .collect();
+        assert_eq!(
+            exact.len(),
+            1,
+            "correlation works over the port too: {:?}",
+            discovery.links
+        );
+    }
+
+    #[test]
+    fn a_remote_host_does_not_leak_this_processs_environment() {
+        use crate::host::testing::MapHost;
+        use std::sync::Arc;
+
+        // The local env says CODEX_HOME is somewhere; the remote host knows
+        // nothing about it. Honouring the local value would send the scan to a
+        // path that does not exist there and label the result as if it did.
+        let host = MapHost::default().with_dir("/home/remote/.codex");
+        let env = Env::fake("/local")
+            .with_var("CODEX_HOME", "/local/elsewhere")
+            .with_host(Arc::new(host));
+
+        assert_eq!(env.var("CODEX_HOME"), None);
+        assert_eq!(
+            crate::providers::codex::codex_home(&env),
+            std::path::Path::new("/home/remote/.codex"),
+            "the remote home is what a remote store resolves against"
+        );
+    }
+
+    #[test]
+    fn a_host_that_cannot_run_commands_still_reports_what_files_prove() {
+        use crate::host::testing::MapHost;
+        use std::sync::Arc;
+
+        // MapHost declines `run`. tmux discovery must degrade to "a socket is
+        // here" rather than failing the scan.
+        let host = MapHost::default().with_file("/tmp/tmux-1000/default", "");
+        let env = Env::fake("/local")
+            .with_host(Arc::new(host))
+            .with_commands(crate::env::StubRunner::new());
+
+        let discovery = scan(&env);
+
+        let tmux = discovery
+            .tools
+            .iter()
+            .find(|report| report.tool == ToolId::Tmux)
+            .expect("tmux report");
+        assert_eq!(tmux.mux_sessions.len(), 1);
+        assert_eq!(
+            tmux.mux_sessions[0].confidence,
+            crate::model::Confidence::Possible,
+            "a socket without a live query is a weak claim, and says so"
+        );
+    }
+
     #[test]
     fn the_whole_discovery_round_trips_through_json() {
         let home = tempfile::tempdir().expect("tempdir");

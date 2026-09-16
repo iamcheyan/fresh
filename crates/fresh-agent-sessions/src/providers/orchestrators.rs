@@ -74,7 +74,7 @@ pub fn scan_orca(env: &Env) -> ToolReport {
             executable: Some(path),
         };
     }
-    if !data.is_dir() {
+    if !env.host().is_dir(&data) {
         return report;
     }
     report
@@ -98,13 +98,13 @@ pub fn scan_orca(env: &Env) -> ToolReport {
         ("keybindings.json", "user keybindings"),
     ] {
         let path = data.join(relative);
-        if path.exists() {
+        if env.host().exists(&path) {
             report.evidence.push(Evidence::dir(&path).saying(meaning));
         }
     }
 
-    for state_file in profile_state_files(&data) {
-        read_orca_state(&state_file, &mut report);
+    for state_file in profile_state_files(env, &data) {
+        read_orca_state(env, &state_file, &mut report);
     }
     report
 }
@@ -115,26 +115,28 @@ pub fn scan_orca(env: &Env) -> ToolReport {
 /// than reimplement that indirection, this looks for the JSON files that
 /// actually parse as state — a profile added by a newer Orca is then found for
 /// free, where a hard-coded filename would miss it.
-fn profile_state_files(data: &Path) -> Vec<PathBuf> {
+fn profile_state_files(env: &Env, data: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     for dir in [data.to_path_buf(), data.join("profiles")] {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Ok(entries) = env.read_dir_sorted(&dir) else {
             continue;
         };
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
-            .collect();
-        paths.sort();
-        candidates.extend(paths);
+        candidates.extend(
+            entries
+                .into_iter()
+                .map(|entry| entry.path)
+                .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json")),
+        );
     }
     candidates
 }
 
-fn read_orca_state(path: &Path, report: &mut ToolReport) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn read_orca_state(env: &Env, path: &Path, report: &mut ToolReport) {
+    const MAX_STATE_BYTES: usize = 8 * 1024 * 1024;
+    let Ok(bytes) = env.host().read_file_prefix(path, MAX_STATE_BYTES) else {
         return;
     };
+    let text = String::from_utf8_lossy(&bytes);
     let Ok(state) = serde_json::from_str::<OrcaState>(&text) else {
         return;
     };
@@ -230,7 +232,7 @@ pub fn scan_superset(env: &Env) -> ToolReport {
     let shim = root.join("bin").join("superset");
     if let Some(path) = env
         .which("superset")
-        .or_else(|| shim.is_file().then(|| shim.clone()))
+        .or_else(|| env.host().is_file(&shim).then(|| shim.clone()))
     {
         report.evidence.push(Evidence::executable(&path));
         report.installed = Installed::Present {
@@ -238,7 +240,7 @@ pub fn scan_superset(env: &Env) -> ToolReport {
             executable: Some(path),
         };
     }
-    if !root.is_dir() {
+    if !env.host().is_dir(&root) {
         return report;
     }
     report
@@ -252,7 +254,7 @@ pub fn scan_superset(env: &Env) -> ToolReport {
     }
 
     let config = root.join("config.json");
-    if config.is_file() {
+    if env.host().is_file(&config) {
         // Named, never read: this file holds a session token.
         report.evidence.push(
             Evidence::file(&config)
@@ -261,19 +263,19 @@ pub fn scan_superset(env: &Env) -> ToolReport {
     }
 
     // A running host server per organization.
-    if let Ok(orgs) = std::fs::read_dir(root.join("host")) {
-        let mut dirs: Vec<PathBuf> = orgs
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .collect();
-        dirs.sort();
-        for org in dirs {
+    if let Ok(orgs) = env.read_dir_sorted(&root.join("host")) {
+        for org in orgs.into_iter().map(|entry| entry.path) {
             let manifest = org.join("manifest.json");
-            if !manifest.is_file() {
+            if !env.host().is_file(&manifest) {
                 continue;
             }
-            let endpoint = std::fs::read_to_string(&manifest)
+            // 64KiB: a manifest is an endpoint and a token. The cap also keeps
+            // this from slurping whatever else ends up under that name.
+            let endpoint = env
+                .host()
+                .read_file_prefix(&manifest, 64 * 1024)
                 .ok()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
                 .and_then(|value| {
                     value
                         .get("endpoint")
@@ -293,13 +295,12 @@ pub fn scan_superset(env: &Env) -> ToolReport {
     }
 
     // Project-less workspaces: one managed directory each, its own git repo.
-    if let Ok(entries) = std::fs::read_dir(root.join("sessions")) {
-        let mut dirs: Vec<PathBuf> = entries
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.is_dir())
-            .collect();
-        dirs.sort();
-        for dir in dirs {
+    if let Ok(entries) = env.read_dir_sorted(&root.join("sessions")) {
+        for dir in entries
+            .into_iter()
+            .filter(|entry| entry.kind == crate::host::EntryKind::Dir)
+            .map(|entry| entry.path)
+        {
             let name = dir
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -353,7 +354,7 @@ pub fn scan_super_engineering(env: &Env) -> ToolReport {
     let support = env.home_join(["Library", "Application Support"]);
     for name in ["super", "Super", "engineering.super.app", "sh.super.app"] {
         let dir = support.join(name);
-        if dir.is_dir() {
+        if env.host().is_dir(&dir) {
             report.evidence.push(
                 Evidence::dir(&dir).saying("super.engineering application support directory"),
             );
@@ -366,7 +367,7 @@ pub fn scan_super_engineering(env: &Env) -> ToolReport {
 
     for bundle in ["/Applications/Super.app", "/Applications/super.app"] {
         let path = Path::new(bundle);
-        if path.exists() {
+        if env.host().exists(path) {
             report
                 .evidence
                 .push(Evidence::dir(path).saying("application bundle"));

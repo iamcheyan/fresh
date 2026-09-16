@@ -38,7 +38,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::env::{modified_unix, Env};
+use crate::env::Env;
+use crate::host::EntryKind;
 use crate::model::{AgentId, AgentSession, Confidence, Evidence};
 
 /// Which files under a root count as sessions.
@@ -174,7 +175,7 @@ impl AgentStore {
         let mut moved_by = None;
         for name in self.base_env {
             if let Some(value) = env.var(name) {
-                if Path::new(value).is_absolute() {
+                if Path::new(&value).is_absolute() {
                     moved_by = Some(Evidence::env_var(*name, value));
                     break;
                 }
@@ -515,7 +516,7 @@ pub fn scan_store(
         // is installed — `root_exists` below is what says that.
         evidence.push(moved);
     }
-    if !root.is_dir() {
+    if !env.host().is_dir(&root) {
         return StoreScan {
             root_exists: false,
             sessions: Vec::new(),
@@ -524,10 +525,16 @@ pub fn scan_store(
     }
     evidence.push(Evidence::dir(&root).saying(format!("{} session store", store.display_name)));
 
-    // One past the limit, so a truncated walk is distinguishable from one that
-    // happened to land exactly on it.
     let mut files = Vec::new();
-    collect_files(&root, &root, store, 0, limit + 1, &mut files, problems);
+    let walk = Walk {
+        env,
+        root: &root,
+        store,
+        // One past the limit, so a truncated walk is distinguishable from one
+        // that happened to land exactly on it.
+        limit: limit + 1,
+    };
+    collect_files(&walk, &root, 0, &mut files, problems);
     files.sort();
     let truncated = files.len() > limit;
     files.truncate(limit);
@@ -560,7 +567,7 @@ pub fn scan_store(
 
     let sessions = files
         .into_iter()
-        .map(|path| session_from_transcript(store, &root, path))
+        .map(|path| session_from_transcript(env, store, &root, path))
         .collect();
     StoreScan {
         root_exists: true,
@@ -582,51 +589,48 @@ pub struct StoreScan {
     pub evidence: Vec<Evidence>,
 }
 
-fn collect_files(
-    root: &Path,
-    dir: &Path,
-    store: &AgentStore,
-    depth: usize,
+/// The fixed half of a walk: everything that does not change as it recurses.
+struct Walk<'a> {
+    env: &'a Env,
+    root: &'a Path,
+    store: &'a AgentStore,
     limit: usize,
+}
+
+fn collect_files(
+    walk: &Walk<'_>,
+    dir: &Path,
+    depth: usize,
     out: &mut Vec<PathBuf>,
     problems: &mut Vec<String>,
 ) {
-    if out.len() >= limit || depth > store.max_depth {
+    if out.len() >= walk.limit || depth > walk.store.max_depth {
         return;
     }
-    let entries = match std::fs::read_dir(dir) {
+    // Sorted, so a truncated scan is at least deterministic rather than
+    // whatever order the host handed back.
+    let entries = match walk.env.read_dir_sorted(dir) {
         Ok(entries) => entries,
         Err(err) => {
             problems.push(format!("{}: {err}", dir.display()));
             return;
         }
     };
-    // Sorted, so a truncated scan is at least deterministic rather than
-    // whatever order the filesystem handed back.
-    let mut children: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .collect();
-    children.sort();
 
-    for path in children {
-        if out.len() >= limit {
+    for entry in entries {
+        if out.len() >= walk.limit {
             return;
         }
-        // `symlink_metadata`, not `metadata`: a symlink pointing back up the
-        // tree would otherwise make this walk unbounded.
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if meta.is_dir() {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if store.dir_rule.descend(name) {
-                collect_files(root, &path, store, depth + 1, limit, out, problems);
+        match entry.kind {
+            // Symlinks are listed but never descended: one pointing back up
+            // the tree would make this walk unbounded.
+            EntryKind::Dir if walk.store.dir_rule.descend(&entry.name) => {
+                collect_files(walk, &entry.path, depth + 1, out, problems);
             }
-        } else if meta.is_file() && matches_file(store, root, &path) {
-            out.push(path);
+            EntryKind::File if matches_file(walk.store, walk.root, &entry.path) => {
+                out.push(entry.path);
+            }
+            _ => {}
         }
     }
 }
@@ -647,9 +651,14 @@ fn matches_file(store: &AgentStore, root: &Path, path: &Path) -> bool {
     store.file_rule.accepts(relative)
 }
 
-fn session_from_transcript(store: &AgentStore, root: &Path, path: PathBuf) -> AgentSession {
+fn session_from_transcript(
+    env: &Env,
+    store: &AgentStore,
+    root: &Path,
+    path: PathBuf,
+) -> AgentSession {
     let (id, id_confidence) = store.layout.session_id(&path);
-    let cwd = read_cwd_field(&path, store.cwd_fields);
+    let cwd = read_cwd_field(env, &path, store.cwd_fields);
     // The record is only as good as its weakest part, and for a path-derived
     // session that is always the id: a cwd read out of the transcript is
     // something the agent wrote down, but the id is still our reading of a
@@ -662,7 +671,7 @@ fn session_from_transcript(store: &AgentStore, root: &Path, path: PathBuf) -> Ag
         git_branch: None,
         title: None,
         transcript: Some(path.clone()),
-        modified_unix: modified_unix(&path),
+        modified_unix: env.modified_unix(&path),
         agent_version: None,
         is_subagent: false,
         parent_session_id: None,
@@ -681,11 +690,11 @@ fn session_from_transcript(store: &AgentStore, root: &Path, path: PathBuf) -> Ag
 /// to megabytes, and the working directory is written in the header record. A
 /// scan that parsed every line to find it would read the user's entire agent
 /// history off disk to build a list.
-pub fn read_cwd_field(path: &Path, fields: &[&str]) -> Option<PathBuf> {
+pub fn read_cwd_field(env: &Env, path: &Path, fields: &[&str]) -> Option<PathBuf> {
     if fields.is_empty() {
         return None;
     }
-    let text = read_first_line(path, 64 * 1024)?;
+    let text = read_first_line(env, path, 64 * 1024)?;
     let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
     for field in fields {
         if let Some(found) = value.get(*field).and_then(serde_json::Value::as_str) {
@@ -698,14 +707,9 @@ pub fn read_cwd_field(path: &Path, fields: &[&str]) -> Option<PathBuf> {
 }
 
 /// Read at most `max_bytes` of `path`, stopping at the first newline.
-pub fn read_first_line(path: &Path, max_bytes: usize) -> Option<String> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut buffer = vec![0u8; max_bytes];
-    let read = file.read(&mut buffer).ok()?;
-    buffer.truncate(read);
-    let text = String::from_utf8_lossy(&buffer).into_owned();
+pub fn read_first_line(env: &Env, path: &Path, max_bytes: usize) -> Option<String> {
+    let bytes = env.host().read_file_prefix(path, max_bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
     // A JSON file (not JSONL) has no newline before its closing brace, so fall
     // back to the whole buffer rather than returning nothing.
     match text.split_once('\n') {

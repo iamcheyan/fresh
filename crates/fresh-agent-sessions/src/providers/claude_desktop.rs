@@ -49,7 +49,7 @@ pub fn scan(env: &Env) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::ClaudeDesktop, "Claude Desktop");
     let dir = app_support_dir(env, "Claude");
 
-    if !dir.is_dir() {
+    if !env.host().is_dir(&dir) {
         return report;
     }
     report
@@ -61,13 +61,15 @@ pub fn scan(env: &Env) -> ToolReport {
     };
 
     let config = dir.join("claude_desktop_config.json");
-    if !config.is_file() {
+    if !env.host().is_file(&config) {
         return report;
     }
 
-    let servers = std::fs::read_to_string(&config)
+    let servers = env
+        .host()
+        .read_file_prefix(&config, 1024 * 1024)
         .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|value| {
             value
                 .get("mcpServers")

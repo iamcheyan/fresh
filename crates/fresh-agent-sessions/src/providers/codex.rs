@@ -31,7 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::env::{modified_unix, Env};
+use crate::env::Env;
 use crate::model::{AgentId, AgentSession, Confidence, Evidence, Installed, ToolId, ToolReport};
 
 /// `$CODEX_HOME`, or `~/.codex`.
@@ -48,7 +48,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
     // name would claim provenance the variable never had — the one thing a
     // crate built on evidence must not do.
     match env.var("CODEX_HOME") {
-        Some(value) if Path::new(value).is_absolute() => {
+        Some(value) if Path::new(&value).is_absolute() => {
             report
                 .evidence
                 .push(Evidence::env_var("CODEX_HOME", value.to_string()));
@@ -71,7 +71,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
             executable: Some(path),
         };
     }
-    if !home.is_dir() {
+    if !env.host().is_dir(&home) {
         return report;
     }
     report
@@ -87,17 +87,17 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
     // The index maps session id to title; without it sessions are still
     // discoverable, just untitled.
     let index_path = home.join("session_index.jsonl");
-    let titles = if index_path.is_file() {
+    let titles = if env.host().is_file(&index_path) {
         report
             .evidence
             .push(Evidence::file(&index_path).saying("session id to title index"));
-        read_index_titles(&index_path)
+        read_index_titles(env, &index_path)
     } else {
         Vec::new()
     };
 
     let state_db = home.join("state_5.sqlite");
-    if state_db.is_file() {
+    if env.host().is_file(&state_db) {
         report.evidence.push(
             Evidence::file(&state_db)
                 .saying("Codex desktop metadata (SQLite; present but not parsed)"),
@@ -105,7 +105,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
     }
 
     let sessions_dir = home.join("sessions");
-    if !sessions_dir.is_dir() {
+    if !env.host().is_dir(&sessions_dir) {
         return report;
     }
     report
@@ -113,11 +113,11 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
         .push(Evidence::dir(&sessions_dir).saying("rollout transcripts, sharded YYYY/MM/DD"));
 
     let mut files = Vec::new();
-    collect_newest_rollouts(&sessions_dir, 0, limit, &mut files, &mut report);
+    collect_newest_rollouts(env, &sessions_dir, 0, limit, &mut files, &mut report);
     for path in files {
         report
             .agent_sessions
-            .push(session_from_rollout(&path, &titles));
+            .push(session_from_rollout(env, &path, &titles));
     }
     report
 }
@@ -133,7 +133,7 @@ pub fn desktop_report(env: &Env) -> ToolReport {
         _ => None,
     };
 
-    if let Some(bundle) = bundle.filter(|path| path.exists()) {
+    if let Some(bundle) = bundle.filter(|path| env.host().exists(path)) {
         report
             .evidence
             .push(Evidence::dir(&bundle).saying("Codex desktop application bundle"));
@@ -141,7 +141,7 @@ pub fn desktop_report(env: &Env) -> ToolReport {
             version: None,
             executable: Some(bundle),
         };
-    } else if state_db.is_file() {
+    } else if env.host().is_file(&state_db) {
         // The state database is the desktop app's own file; the CLI does not
         // write it. Its presence is the strongest signal available off macOS.
         report.evidence.push(
@@ -170,6 +170,7 @@ pub fn desktop_report(env: &Env) -> ToolReport {
 
 /// Walk the `YYYY/MM/DD` shards newest-first, stopping at `limit` files.
 fn collect_newest_rollouts(
+    env: &Env,
     dir: &Path,
     depth: usize,
     limit: usize,
@@ -182,32 +183,29 @@ fn collect_newest_rollouts(
     if out.len() >= limit {
         return;
     }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
+    let mut children = match env.read_dir_sorted(dir) {
+        Ok(children) => children,
         Err(err) => {
             report.note_problem(format!("{}: {err}", dir.display()));
             return;
         }
     };
-    let mut children: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .collect();
     // Descending: `2026` before `2025`, `12` before `01`. Zero-padded date
     // components make lexicographic order the same as chronological order.
-    children.sort_by(|a, b| b.cmp(a));
+    children.reverse();
 
-    for path in children {
+    for entry in children {
         if out.len() >= limit {
             return;
         }
         if depth < DATE_DEPTH {
-            if path.is_dir() {
-                collect_newest_rollouts(&path, depth + 1, limit, out, report);
+            if entry.kind == crate::host::EntryKind::Dir {
+                collect_newest_rollouts(env, &entry.path, depth + 1, limit, out, report);
             }
             continue;
         }
-        if is_rollout(&path) {
-            out.push(path);
+        if is_rollout(&entry.path) {
+            out.push(entry.path);
         }
     }
 }
@@ -246,7 +244,7 @@ fn is_uuid_shaped(value: &str) -> bool {
             .all(|group| group.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
-fn session_from_rollout(path: &Path, titles: &[(String, String)]) -> AgentSession {
+fn session_from_rollout(env: &Env, path: &Path, titles: &[(String, String)]) -> AgentSession {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -263,11 +261,11 @@ fn session_from_rollout(path: &Path, titles: &[(String, String)]) -> AgentSessio
     AgentSession {
         id,
         agent: AgentId::Codex,
-        cwd: crate::catalog::read_cwd_field(path, &["cwd", "workdir", "working_directory"]),
+        cwd: crate::catalog::read_cwd_field(env, path, &["cwd", "workdir", "working_directory"]),
         git_branch: None,
         title,
         transcript: Some(path.to_path_buf()),
-        modified_unix: modified_unix(path),
+        modified_unix: env.modified_unix(path),
         agent_version: None,
         is_subagent: false,
         parent_session_id: None,
@@ -281,18 +279,18 @@ fn session_from_rollout(path: &Path, titles: &[(String, String)]) -> AgentSessio
 }
 
 /// `(session id, title)` pairs from `session_index.jsonl`.
-fn read_index_titles(path: &Path) -> Vec<(String, String)> {
-    use std::io::{BufRead, BufReader};
-
+fn read_index_titles(env: &Env, path: &Path) -> Vec<(String, String)> {
     const MAX_RECORDS: usize = 20_000;
+    /// The index is one short record per session; 4MiB is thousands of them
+    /// and keeps the remote case from pulling an unbounded file.
+    const MAX_BYTES: usize = 4 * 1024 * 1024;
 
-    let Ok(file) = std::fs::File::open(path) else {
+    let Ok(bytes) = env.host().read_file_prefix(path, MAX_BYTES) else {
         return Vec::new();
     };
-    BufReader::new(file)
-        .lines()
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    text.lines()
         .take(MAX_RECORDS)
-        .filter_map(Result::ok)
         .filter_map(|line| {
             let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
             let id = value

@@ -42,7 +42,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::env::{modified_unix, Env};
+use crate::env::Env;
 use crate::model::{AgentId, AgentSession, Confidence, Evidence, Installed, ToolId, ToolReport};
 
 /// Encode a working directory the way Claude Code names its project bucket.
@@ -90,7 +90,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
 
     let home = env.dir_override(&["CLAUDE_CONFIG_DIR"], env.home_join([".claude"]));
     let settings = env.home_join([".claude.json"]);
-    if settings.is_file() {
+    if env.host().is_file(&settings) {
         report.evidence.push(
             Evidence::file(&settings)
                 .saying("Claude Code global settings; presence proves install"),
@@ -109,7 +109,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
     }
 
     let projects = home.join("projects");
-    if !projects.is_dir() {
+    if !env.host().is_dir(&projects) {
         return report;
     }
     report
@@ -122,7 +122,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
         };
     }
 
-    let buckets = match read_sorted_dir(&projects) {
+    let buckets = match read_sorted_dir(env, &projects) {
         Ok(buckets) => buckets,
         Err(err) => {
             report.note_problem(format!("{}: {err}", projects.display()));
@@ -132,10 +132,10 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
 
     let mut truncated = false;
     for bucket in buckets {
-        if !bucket.is_dir() {
+        if !env.host().is_dir(&bucket) {
             continue;
         }
-        if scan_bucket(&bucket, limit, &mut report) {
+        if scan_bucket(env, &bucket, limit, &mut report) {
             truncated = true;
             break;
         }
@@ -162,8 +162,8 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
 /// ride along with the parent that owns them. Counting rows would let one
 /// heavily-delegating session exhaust the whole budget by itself and return a
 /// page with a single resumable entry on it.
-fn scan_bucket(bucket: &Path, limit: usize, report: &mut ToolReport) -> bool {
-    let entries = match read_sorted_dir(bucket) {
+fn scan_bucket(env: &Env, bucket: &Path, limit: usize, report: &mut ToolReport) -> bool {
+    let entries = match read_sorted_dir(env, bucket) {
         Ok(entries) => entries,
         Err(err) => {
             report.note_problem(format!("{}: {err}", bucket.display()));
@@ -178,14 +178,14 @@ fn scan_bucket(bucket: &Path, limit: usize, report: &mut ToolReport) -> bool {
         if top_level_count(report) >= limit {
             return true;
         }
-        let session = read_session(&path, bucket, false);
+        let session = read_session(env, &path, bucket, false);
         // The sibling directory named after the session holds its sub-agents.
         let subagent_dir = path.with_extension("");
-        if subagent_dir.is_dir() {
-            if let Ok(children) = read_sorted_dir(&subagent_dir) {
+        if env.host().is_dir(&subagent_dir) {
+            if let Ok(children) = read_sorted_dir(env, &subagent_dir) {
                 for child in children {
                     if child.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-                        let mut sub = read_session(&child, bucket, true);
+                        let mut sub = read_session(env, &child, bucket, true);
                         // A sub-agent's transcript records its *parent's*
                         // sessionId. Left as the row's id it would collide with
                         // the parent and with every sibling, and one host pane
@@ -218,8 +218,8 @@ fn scan_bucket(bucket: &Path, limit: usize, report: &mut ToolReport) -> bool {
     false
 }
 
-fn read_session(path: &Path, bucket: &Path, is_subagent: bool) -> AgentSession {
-    let header = read_header(path);
+fn read_session(env: &Env, path: &Path, bucket: &Path, is_subagent: bool) -> AgentSession {
+    let header = read_header(env, path);
     let bucket_name = bucket
         .file_name()
         .and_then(|name| name.to_str())
@@ -253,7 +253,7 @@ fn read_session(path: &Path, bucket: &Path, is_subagent: bool) -> AgentSession {
         git_branch: header.git_branch,
         title: None,
         transcript: Some(path.to_path_buf()),
-        modified_unix: modified_unix(path),
+        modified_unix: env.modified_unix(path),
         agent_version: header.version,
         is_subagent,
         parent_session_id: None,
@@ -271,17 +271,22 @@ fn read_session(path: &Path, bucket: &Path, is_subagent: bool) -> AgentSession {
 /// The budget is a line count, not a byte count, because a single record can
 /// legitimately be a megabyte — one tool result with a large stdout — and a
 /// byte budget would stop mid-record and find nothing.
-fn read_header(path: &Path) -> Header {
-    use std::io::{BufRead, BufReader};
-
+fn read_header(env: &Env, path: &Path) -> Header {
     const MAX_RECORDS: usize = 32;
+    /// Enough for the header records of every transcript seen, and a bound the
+    /// remote case needs: without it a scan pulls whole transcripts across the
+    /// network to read their first few fields.
+    const MAX_BYTES: usize = 256 * 1024;
 
-    let Ok(file) = std::fs::File::open(path) else {
+    let Ok(bytes) = env.host().read_file_prefix(path, MAX_BYTES) else {
         return Header::default();
     };
+    let text = String::from_utf8_lossy(&bytes);
     let mut header = Header::default();
-    for line in BufReader::new(file).lines().take(MAX_RECORDS) {
-        let Ok(line) = line else { break };
+    // The last line of a truncated read is very likely a partial record; it
+    // simply fails to parse and is skipped, which is the same handling any
+    // other unparseable line gets.
+    for line in text.lines().take(MAX_RECORDS) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
@@ -320,12 +325,12 @@ fn top_level_count(report: &ToolReport) -> usize {
         .count()
 }
 
-fn read_sorted_dir(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .collect();
-    paths.sort();
-    Ok(paths)
+fn read_sorted_dir(env: &Env, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    Ok(env
+        .read_dir_sorted(dir)?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect())
 }
 
 #[cfg(test)]

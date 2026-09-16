@@ -84,7 +84,7 @@ pub fn scan(env: &Env) -> ToolReport {
     }
 
     for (config, variant) in config_dirs(env) {
-        if !config.is_dir() {
+        if !env.host().is_dir(&config) {
             continue;
         }
         report
@@ -102,19 +102,21 @@ pub fn scan(env: &Env) -> ToolReport {
         }
 
         // The default session lives in the config directory itself.
-        read_session_dir(&config, &qualify(variant, "default"), &mut report);
+        read_session_dir(env, &config, &qualify(variant, "default"), &mut report);
 
         let named = config.join("sessions");
-        if let Ok(entries) = std::fs::read_dir(&named) {
-            let mut dirs: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-            dirs.sort();
-            for dir in dirs.into_iter().filter(|path| path.is_dir()) {
+        if let Ok(entries) = env.read_dir_sorted(&named) {
+            for dir in entries
+                .into_iter()
+                .filter(|entry| entry.kind == crate::host::EntryKind::Dir)
+                .map(|entry| entry.path)
+            {
                 let name = dir
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unnamed")
                     .to_string();
-                read_session_dir(&dir, &qualify(variant, &name), &mut report);
+                read_session_dir(env, &dir, &qualify(variant, &name), &mut report);
             }
         }
     }
@@ -133,9 +135,9 @@ fn qualify(variant: &str, name: &str) -> String {
 }
 
 /// Read one session directory: its snapshot and its sockets.
-fn read_session_dir(dir: &Path, name: &str, report: &mut ToolReport) {
+fn read_session_dir(env: &Env, dir: &Path, name: &str, report: &mut ToolReport) {
     let api_socket = dir.join("herdr.sock");
-    let has_socket = api_socket.exists();
+    let has_socket = env.host().exists(&api_socket);
     if has_socket {
         report.evidence.push(
             Evidence::socket(&api_socket)
@@ -144,11 +146,17 @@ fn read_session_dir(dir: &Path, name: &str, report: &mut ToolReport) {
     }
 
     let snapshot_path = dir.join("session.json");
-    if !snapshot_path.is_file() {
+    if !env.host().is_file(&snapshot_path) {
         return;
     }
-    let text = match std::fs::read_to_string(&snapshot_path) {
-        Ok(text) => text,
+    // A session snapshot is a layout, not a transcript: bounded, but generously
+    // so, since a big workspace with many panes is legitimate.
+    const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+    let text = match env
+        .host()
+        .read_file_prefix(&snapshot_path, MAX_SNAPSHOT_BYTES)
+    {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(err) => {
             report.note_problem(format!("{}: {err}", snapshot_path.display()));
             return;

@@ -28,7 +28,10 @@ pub fn scan_screen(env: &Env) -> ToolReport {
         };
     }
 
-    let user = env.var("USER").or_else(|| env.var("LOGNAME")).unwrap_or("");
+    let user = env
+        .var("USER")
+        .or_else(|| env.var("LOGNAME"))
+        .unwrap_or_default();
     let mut dirs = Vec::new();
     if let Some(explicit) = env.var("SCREENDIR").map(PathBuf::from) {
         if explicit.is_absolute() {
@@ -44,7 +47,7 @@ pub fn scan_screen(env: &Env) -> ToolReport {
     }
 
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Ok(entries) = env.read_dir_sorted(&dir) else {
             continue;
         };
         report
@@ -56,11 +59,7 @@ pub fn scan_screen(env: &Env) -> ToolReport {
                 executable: None,
             };
         }
-        let mut sockets: Vec<PathBuf> = entries
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .collect();
-        sockets.sort();
-        for socket in sockets {
+        for socket in entries.into_iter().map(|entry| entry.path) {
             let name = socket
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -71,7 +70,7 @@ pub fn scan_screen(env: &Env) -> ToolReport {
                 // `<pid>.<tty>.<host>` — the part after the first dot is the
                 // name a user would recognise.
                 name: name.split_once('.').map(|(_, rest)| rest.to_string()),
-                created_unix: crate::env::modified_unix(&socket),
+                created_unix: env.modified_unix(&socket),
                 attached: None,
                 socket: Some(socket.clone()),
                 panes: Vec::new(),
@@ -100,8 +99,15 @@ pub fn scan_zellij(env: &Env) -> ToolReport {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .map(|path| path.join("zellij"))
-        .unwrap_or_else(|| PathBuf::from(format!("/tmp/zellij-{}", env.uid())));
-    if runtime.is_dir() {
+        // No uid means no `/tmp/zellij-<uid>` to guess at; the command path
+        // below still works, and inventing a uid would point at someone else's
+        // directory.
+        .or_else(|| {
+            env.uid()
+                .map(|uid| PathBuf::from(format!("/tmp/zellij-{uid}")))
+        })
+        .unwrap_or_else(|| PathBuf::from("/nonexistent"));
+    if env.host().is_dir(&runtime) {
         report
             .evidence
             .push(Evidence::dir(&runtime).saying("zellij runtime directory"));

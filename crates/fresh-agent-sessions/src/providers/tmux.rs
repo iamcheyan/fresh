@@ -241,28 +241,40 @@ fn socket_paths(env: &Env, report: &mut ToolReport) -> Vec<PathBuf> {
         }
         None => PathBuf::from("/tmp"),
     };
-    let dir = tmpdir.join(format!("tmux-{}", env.uid()));
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    // Without a uid there is no `tmux-<uid>` to look in, and guessing one
+    // would point the search at another user's directory.
+    let Some(uid) = env.uid() else {
+        report.note_problem(
+            "this host does not report a uid, so tmux's socket directory cannot be located"
+                .to_string(),
+        );
+        return Vec::new();
+    };
+    let dir = tmpdir.join(format!("tmux-{uid}"));
+    let Ok(entries) = env.read_dir_sorted(&dir) else {
         return Vec::new();
     };
     report.evidence.push(Evidence::dir(&dir));
-    let mut sockets: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| is_socket(path))
-        .collect();
-    sockets.sort();
-    sockets
+    entries
+        .into_iter()
+        .map(|entry| entry.path)
+        .filter(|path| is_socket(env, path))
+        .collect()
 }
 
-#[cfg(unix)]
-fn is_socket(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::FileTypeExt;
-    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
-}
-
-#[cfg(not(unix))]
-fn is_socket(_path: &std::path::Path) -> bool {
-    false
+/// Whether `path` looks like a tmux socket.
+///
+/// The [`Host`](crate::host::Host) metadata this crate carries says "file" or
+/// "directory" and nothing finer, deliberately: a remote host reached over a
+/// file-transfer protocol often cannot report a socket either. So the test is
+/// "inside tmux's own socket directory and not a directory", which inside
+/// `tmux-<uid>/` is exactly the set of sockets — and on a host that *can* tell
+/// us, a socket reports as neither file nor directory and still passes.
+fn is_socket(env: &Env, path: &std::path::Path) -> bool {
+    match env.host().symlink_metadata(path) {
+        Ok(meta) => !meta.kind_is_dir,
+        Err(_) => false,
+    }
 }
 
 /// Ask the server on `socket` for its sessions and panes.

@@ -74,19 +74,40 @@
 //! reported as existing and are not read for their secrets: see
 //! [`providers::orchestrators`].
 //!
-//! # Scope
+//! # Scanning another machine
 //!
-//! Local state only. Several of these tools support remote hosts, WSL distros
-//! and cloud runtimes, and their sessions live on those machines — out of
-//! scope here, and a scan does not pretend otherwise.
+//! A scan is not tied to this machine. Everything it reads goes through the
+//! [`Host`] port, so pointing it somewhere else scans somewhere else:
+//!
+//! ```no_run
+//! # use std::sync::Arc;
+//! use fresh_agent_sessions::{scan, Env, Host};
+//! # fn build(_: ()) -> Arc<dyn Host> { unimplemented!() }
+//! # let my_ssh_host = build(());
+//! let discovery = scan(&Env::from_process().with_host(my_ssh_host));
+//! ```
+//!
+//! `fresh-editor` already owns this concept — an `Authority` is its one slot
+//! for "where does the editor act?", with local, SSH, container and
+//! plugin-supplied backends behind it. The editor supplies a small adapter from
+//! `Authority` to [`Host`]; this crate does not depend on the editor, which
+//! would be a cycle, and holds a read-only interface so it cannot write even by
+//! mistake. [`crate::host`] has the adapter sketch and the reasoning.
+//!
+//! What stays out of scope is *aggregation*: a scan reports one machine. A
+//! caller that wants several runs one scan per host and keeps the results
+//! apart, because two machines can hold the same session id and merging them
+//! would invent a session that exists on neither.
 
 pub mod catalog;
 pub mod env;
+pub mod host;
 pub mod model;
 pub mod providers;
 pub mod scan;
 
 pub use env::{CommandRunner, Env, Platform, ProcessRunner, StubRunner};
+pub use host::{EntryKind, Host, HostEntry, HostMetadata, LocalHost};
 pub use model::{
     AgentId, AgentSession, Confidence, Discovery, Evidence, EvidenceKind, Installed, Link,
     LinkReason, MuxSession, Pane, ToolId, ToolReport, Workspace,

@@ -15,7 +15,10 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::host::{Host, HostEntry, LocalHost};
 
 /// The operating system a scan is reporting about.
 ///
@@ -128,12 +131,17 @@ impl CommandRunner for NoCommands {
 }
 
 /// The environment a scan reads.
+///
+/// Holds the [`Host`] being scanned. By default that is this machine; give it
+/// another with [`Env::with_host`] and the same providers scan an SSH host, a
+/// container, or a fixture with no filesystem behind it at all.
 pub struct Env {
-    home: PathBuf,
-    vars: BTreeMap<String, String>,
-    platform: Platform,
-    uid: u32,
-    path_dirs: Vec<PathBuf>,
+    /// Configured by the builder methods, and used when `host` is unset. Kept
+    /// concrete so `with_var`/`with_uid`/… stay available without needing a
+    /// downcast.
+    local: LocalHost,
+    /// A caller-supplied host. When present it answers everything.
+    host: Option<Arc<dyn Host>>,
     runner: Box<dyn CommandRunner>,
     commands_enabled: bool,
 }
@@ -141,9 +149,9 @@ pub struct Env {
 impl std::fmt::Debug for Env {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Env")
-            .field("home", &self.home)
-            .field("platform", &self.platform)
-            .field("uid", &self.uid)
+            .field("host", &self.host().label())
+            .field("home", &self.home())
+            .field("platform", &self.platform())
             .field("commands_enabled", &self.commands_enabled)
             .finish_non_exhaustive()
     }
@@ -163,11 +171,14 @@ impl Env {
             .map(|path| std::env::split_paths(&path).collect())
             .unwrap_or_default();
         Self {
-            home,
-            vars,
-            platform: Platform::host(),
-            uid: current_uid(),
-            path_dirs,
+            local: LocalHost {
+                home,
+                vars,
+                platform: Platform::host(),
+                uid: Some(current_uid()),
+                path_dirs,
+            },
+            host: None,
             runner: Box::new(NoCommands),
             commands_enabled: false,
         }
@@ -176,14 +187,47 @@ impl Env {
     /// A synthetic environment rooted at `home`, with no variables set.
     pub fn fake(home: impl Into<PathBuf>) -> Self {
         Self {
-            home: home.into(),
-            vars: BTreeMap::new(),
-            platform: Platform::Linux,
-            uid: 1000,
-            path_dirs: Vec::new(),
+            local: LocalHost {
+                home: home.into(),
+                vars: BTreeMap::new(),
+                platform: Platform::Linux,
+                uid: Some(1000),
+                path_dirs: Vec::new(),
+            },
+            host: None,
             runner: Box::new(NoCommands),
             commands_enabled: false,
         }
+    }
+
+    /// Scan `host` instead of this machine.
+    ///
+    /// This is the seam the editor wires an `Authority` onto — see
+    /// [`crate::host`]. The host answers every filesystem question and may
+    /// also answer [`Host::run`]; when it declines, and no [`CommandRunner`]
+    /// was installed, providers report what files alone can prove.
+    #[must_use]
+    pub fn with_host(mut self, host: Arc<dyn Host>) -> Self {
+        self.host = Some(host);
+        self
+    }
+
+    /// The host being scanned.
+    pub fn host(&self) -> &dyn Host {
+        match &self.host {
+            Some(host) => host.as_ref(),
+            None => &self.local,
+        }
+    }
+
+    /// A short label for the scanned machine, for evidence and UI.
+    pub fn host_label(&self) -> &str {
+        self.host().label()
+    }
+
+    /// Whether the scan is looking at some machine other than this one.
+    pub fn is_remote(&self) -> bool {
+        self.host.is_some()
     }
 
     /// Allow providers to run their tools' own listing commands.
@@ -206,39 +250,45 @@ impl Env {
 
     #[must_use]
     pub fn with_var(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.vars.insert(name.into(), value.into());
+        self.local.vars.insert(name.into(), value.into());
         self
     }
 
     #[must_use]
     pub fn with_platform(mut self, platform: Platform) -> Self {
-        self.platform = platform;
+        self.local.platform = platform;
         self
     }
 
     #[must_use]
     pub fn with_uid(mut self, uid: u32) -> Self {
-        self.uid = uid;
+        self.local.uid = Some(uid);
         self
     }
 
     /// Directories to search for executables, in order.
     #[must_use]
     pub fn with_path_dirs(mut self, dirs: impl IntoIterator<Item = PathBuf>) -> Self {
-        self.path_dirs = dirs.into_iter().collect();
+        self.local.path_dirs = dirs.into_iter().collect();
         self
     }
 
-    pub fn home(&self) -> &Path {
-        &self.home
+    /// The scanned host's home directory.
+    ///
+    /// A host that cannot report one yields `/`, which makes every store path
+    /// miss rather than silently resolving against this process's home and
+    /// reporting local sessions as though they were the remote machine's.
+    pub fn home(&self) -> PathBuf {
+        self.host().home_dir().unwrap_or_else(|| PathBuf::from("/"))
     }
 
     pub fn platform(&self) -> Platform {
-        self.platform
+        self.host().platform()
     }
 
-    pub fn uid(&self) -> u32 {
-        self.uid
+    /// The scanned user's uid, when the host can say.
+    pub fn uid(&self) -> Option<u32> {
+        self.host().uid()
     }
 
     pub fn commands_enabled(&self) -> bool {
@@ -250,10 +300,9 @@ impl Env {
     /// Why empty-is-unset: a wrapper that exports `CODEX_HOME=` has configured
     /// nothing, and resolving that to the process's cwd would make a scan
     /// report sessions from wherever it happened to be started.
-    pub fn var(&self, name: &str) -> Option<&str> {
-        self.vars
-            .get(name)
-            .map(String::as_str)
+    pub fn var(&self, name: &str) -> Option<String> {
+        self.host()
+            .var(name)
             .filter(|value| !value.trim().is_empty())
     }
 
@@ -263,7 +312,7 @@ impl Env {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut path = self.home.clone();
+        let mut path = self.home();
         for segment in segments {
             path.push(segment.as_ref());
         }
@@ -279,13 +328,13 @@ impl Env {
     pub fn dir_override(&self, names: &[&str], default: PathBuf) -> PathBuf {
         for name in names {
             if let Some(value) = self.var(name) {
-                let path = PathBuf::from(value);
+                let path = PathBuf::from(&value);
                 if path.is_absolute() {
                     return path;
                 }
                 tracing::debug!(
                     var = name,
-                    value,
+                    %value,
                     "ignoring relative path override; expected an absolute path"
                 );
             }
@@ -294,20 +343,46 @@ impl Env {
     }
 
     /// Run a command, if commands are enabled.
+    ///
+    /// An explicitly installed [`CommandRunner`] wins; otherwise the host is
+    /// asked, which is how a remote adapter that *can* run commands gets used
+    /// without the caller wiring a second thing.
     pub fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
         if !self.commands_enabled {
             return Err(format!("commands are disabled; not running {program}"));
         }
-        tracing::debug!(program, ?args, "running third-party listing command");
-        self.runner.run(program, args)
+        tracing::debug!(
+            program,
+            ?args,
+            host = self.host_label(),
+            "running listing command"
+        );
+        match self.runner.run(program, args) {
+            Ok(output) => Ok(output),
+            Err(err) if self.host.is_some() => self
+                .host()
+                .run(program, args)
+                .map_err(|host_err| format!("{err}; host also declined: {host_err}")),
+            Err(err) => Err(err),
+        }
     }
 
-    /// Find `program` on the configured `PATH`.
+    /// Find `program` on the scanned host's `PATH`.
     pub fn which(&self, program: &str) -> Option<PathBuf> {
-        self.path_dirs
-            .iter()
-            .map(|dir| dir.join(program))
-            .find(|candidate| candidate.is_file())
+        self.host().which(program)
+    }
+
+    /// Entries of `path`, sorted, from the scanned host.
+    pub fn read_dir_sorted(&self, path: &Path) -> std::io::Result<Vec<HostEntry>> {
+        self.host().read_dir_sorted(path)
+    }
+
+    /// A file's mtime on the scanned host.
+    pub fn modified_unix(&self, path: &Path) -> Option<u64> {
+        self.host()
+            .metadata(path)
+            .ok()
+            .and_then(|meta| meta.modified_unix)
     }
 
     /// Now, as a unix timestamp.
@@ -335,13 +410,4 @@ extern "C" {
 #[cfg(not(unix))]
 fn current_uid() -> u32 {
     0
-}
-
-/// A file's mtime as a unix timestamp, or `None` if it cannot be read.
-pub fn modified_unix(path: &Path) -> Option<u64> {
-    std::fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
 }
