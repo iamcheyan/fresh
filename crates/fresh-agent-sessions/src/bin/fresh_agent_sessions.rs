@@ -1,228 +1,123 @@
-//! Print what other tools are running on this machine.
+//! Print the agent sessions on this machine.
 //!
-//! ```text
-//! fresh-agent-sessions [--json] [--all] [--commands] [--limit N]
-//! ```
-//!
-//! `--commands` lets providers run their tools' own listing commands (`tmux
-//! list-sessions`, `zellij list-sessions`, `sc worktree list --json`). Without
-//! it the scan is pure filesystem reads, which is why it is not the default:
-//! a discovery pass should not fork processes unless asked.
+//! A thin caller of the library, and the only thing that knows about argv. It
+//! constructs a [`LocalTarget`] and calls `collect_sessions`; a consumer that
+//! wants a remote machine supplies its own `Target` instead. Nothing here is
+//! required to use the crate.
 
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
 
-use fresh_agent_sessions::{collect, scan_with, Confidence, Env, Installed, ScanOptions};
+use fresh_agent_sessions::{collect_sessions_with, Confidence, LocalTarget, ScanOptions, Status};
+
+const HELP: &str = "\
+fresh-agent-sessions — list the agent sessions other tools are running
+
+  --json           machine-readable output
+  --commands       allow running tools' own listing commands (tmux, zellij, sc)
+  --limit N        cap sessions reported per tool (default 200)
+  --machine NAME   name this machine in every session key
+  --verbose        also print the per-tool report and any problems";
 
 fn main() -> ExitCode {
     let mut options = ScanOptions::default();
     let mut json = false;
     let mut commands = false;
-    let mut flat = false;
-    let mut machine: Option<String> = None;
+    let mut verbose = false;
+    let mut machine = "local".to_string();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--json" => json = true,
-            "--all" => options.include_absent = true,
             "--commands" => commands = true,
-            "--no-correlate" => options.correlate = false,
-            "--flat" => flat = true,
+            "--verbose" => verbose = true,
+            "--all" => options.include_absent = true,
             "--machine" => match args.next() {
-                Some(name) => machine = Some(name),
-                None => {
-                    eprintln!("--machine needs a name");
-                    return ExitCode::FAILURE;
-                }
+                Some(name) => machine = name,
+                None => return fail("--machine needs a name"),
             },
             "--limit" => match args.next().and_then(|value| value.parse().ok()) {
                 Some(limit) => options.max_sessions_per_tool = limit,
-                None => {
-                    eprintln!("--limit needs a number");
-                    return ExitCode::FAILURE;
-                }
+                None => return fail("--limit needs a number"),
             },
             "-h" | "--help" => {
-                println!("{}", HELP);
+                println!("{HELP}");
                 return ExitCode::SUCCESS;
             }
-            other => {
-                eprintln!("unknown argument: {other}\n\n{HELP}");
-                return ExitCode::FAILURE;
-            }
+            other => return fail(&format!("unknown argument: {other}\n\n{HELP}")),
         }
     }
 
-    let env = Env::from_process();
-    let env = if commands {
-        env.with_process_commands()
+    let target = LocalTarget::from_process().with_name(machine);
+    let target = if commands {
+        target.with_commands()
     } else {
-        env
+        target
     };
-    let env = match machine {
-        Some(name) => env.with_machine(name),
-        None => env,
-    };
-    let discovery = scan_with(&env, &options);
 
-    // The flat view is what a UI consumes: one self-contained row per session,
-    // newest first, safe to concatenate with another machine's rows.
-    if flat {
-        let rows = collect(&discovery);
-        if json {
-            match serde_json::to_string_pretty(&rows) {
-                Ok(text) => println!("{text}"),
-                Err(err) => {
-                    eprintln!("could not serialize sessions: {err}");
-                    return ExitCode::FAILURE;
-                }
-            }
-            return ExitCode::SUCCESS;
-        }
-        for row in &rows {
-            let owner = match row.owner.pane.as_deref() {
-                Some(pane) => format!("{}:{pane}", row.owner.display_name),
-                None => row.owner.display_name.clone(),
-            };
-            println!(
-                "{:<10} {:<9} {:<26} {}",
-                row.key.machine.as_str(),
-                row.agent.map(|agent| agent.as_str()).unwrap_or("-"),
-                owner,
-                row.display_title()
-            );
-        }
-        return ExitCode::SUCCESS;
-    }
+    // Nothing cancels a one-shot CLI run; a UI would hold this and flip it.
+    let cancel = AtomicBool::new(false);
+    let result = collect_sessions_with(&target, &cancel, &options);
 
     if json {
-        match serde_json::to_string_pretty(&discovery) {
+        match serde_json::to_string_pretty(&result) {
             Ok(text) => println!("{text}"),
-            Err(err) => {
-                eprintln!("could not serialize discovery: {err}");
-                return ExitCode::FAILURE;
-            }
+            Err(err) => return fail(&format!("could not serialize result: {err}")),
         }
         return ExitCode::SUCCESS;
     }
 
-    print_human(&discovery, commands);
-    ExitCode::SUCCESS
-}
-
-const HELP: &str = "\
-fresh-agent-sessions — find agent sessions, workspaces and worktrees that other tools manage
-
-  --json           machine-readable output
-  --all            include tools that left nothing behind
-  --commands       allow running tools' own listing commands (tmux, zellij, sc)
-  --no-correlate   skip cross-tool linking
-  --limit N        cap sessions reported per tool (default 200)
-  --flat           one self-contained row per session (what a UI consumes)
-  --machine NAME   name this machine in every session key";
-
-fn print_human(discovery: &fresh_agent_sessions::Discovery, commands: bool) {
-    let reports: Vec<_> = discovery.tools.iter().collect();
-    if reports.is_empty() {
-        println!("No third-party session-managing tools found.");
-        return;
+    if let Status::Unreachable { error } = &result.status {
+        eprintln!("{}: unreachable — {error}", result.machine);
+        return ExitCode::FAILURE;
     }
 
-    for report in reports {
-        let status = match &report.installed {
-            Installed::Present {
-                version: Some(v), ..
-            } => format!(" ({v})"),
-            Installed::Present { .. } => String::new(),
-            Installed::Absent => " — not installed".to_string(),
-            Installed::Unsupported { reason } => format!(" — {reason}"),
+    for session in &result.sessions {
+        let marker = match session.confidence {
+            Confidence::Certain => ' ',
+            Confidence::Probable => '~',
+            Confidence::Possible => '?',
         };
-        println!("\n{}{}", report.display_name, status);
+        let owner = match session.owner.pane.as_deref() {
+            Some(pane) => format!("{}:{pane}", session.owner.display_name),
+            None => session.owner.display_name.clone(),
+        };
+        println!(
+            "{marker}{:<10} {:<9} {:<26} {}",
+            session.key.machine.as_str(),
+            session.agent.map(|agent| agent.as_str()).unwrap_or("-"),
+            owner,
+            session.display_title()
+        );
+    }
 
-        for workspace in &report.workspaces {
-            let path = workspace
-                .path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "?".to_string());
-            let kind = match workspace.is_worktree {
-                Some(true) => "worktree",
-                Some(false) => "folder",
-                None => "workspace",
-            };
-            println!(
-                "  [{kind}] {} — {path}{}",
-                workspace.name.as_deref().unwrap_or(&workspace.id),
-                workspace
-                    .branch
-                    .as_deref()
-                    .map(|b| format!(" ({b})"))
-                    .unwrap_or_default()
-            );
-        }
+    if result.sessions.is_empty() {
+        println!("No agent sessions found on {}.", result.machine);
+    }
 
-        for mux in &report.mux_sessions {
-            println!(
-                "  [session] {} — {} pane(s){}",
-                mux.name.as_deref().unwrap_or(&mux.id),
-                mux.panes.len(),
-                match mux.attached {
-                    Some(true) => ", attached",
-                    Some(false) => ", detached",
-                    None => "",
-                }
-            );
-            for pane in mux.panes.iter().filter(|pane| pane.agent.is_some()) {
-                println!(
-                    "      {} in {}",
-                    pane.agent.map(|a| a.as_str()).unwrap_or("?"),
-                    pane.cwd
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "?".to_string())
-                );
+    if verbose {
+        for tool in result.discovery.present_tools() {
+            println!("\n{}", tool.display_name);
+            for evidence in &tool.evidence {
+                println!("  {:?} {}", evidence.kind, evidence.locator);
             }
         }
-
-        for session in &report.agent_sessions {
-            let marker = match session.confidence {
-                Confidence::Certain => ' ',
-                Confidence::Probable => '~',
-                Confidence::Possible => '?',
-            };
-            println!(
-                "  {marker}[{}] {} — {}{}",
-                session.agent.as_str(),
-                session.id,
-                session
-                    .cwd
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "unknown cwd".to_string()),
-                session
-                    .title
-                    .as_deref()
-                    .map(|t| format!(" — {t}"))
-                    .unwrap_or_default()
-            );
-        }
-
-        for problem in &report.problems {
+        for problem in &result.problems {
             println!("  ! {problem}");
-        }
-    }
-
-    if !discovery.links.is_empty() {
-        println!("\nCross-tool links ({}):", discovery.links.len());
-        for link in &discovery.links {
-            println!("  {} hosts {} ({:?})", link.host, link.hosted, link.reason);
         }
     }
 
     if !commands {
         println!(
             "\nNote: live multiplexer state was not queried. Re-run with --commands to ask \
-             tmux/zellij/sc for their current sessions."
+             tmux/zellij for their current sessions."
         );
     }
+    ExitCode::SUCCESS
+}
+
+fn fail(message: &str) -> ExitCode {
+    eprintln!("{message}");
+    ExitCode::FAILURE
 }

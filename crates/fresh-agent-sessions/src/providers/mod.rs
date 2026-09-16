@@ -1,6 +1,6 @@
 //! One module per tool whose storage format we had to work out.
 //!
-//! Each provider is a plain `scan(&Env) -> ToolReport`: no trait object, no
+//! Each provider is a plain `scan(&Machine<'_>) -> ToolReport`: no trait object, no
 //! registration. The set of tools is fixed at compile time and small enough to
 //! list in [`crate::scan`], and a free function is far easier to test — every
 //! provider's tests build a `tempfile::TempDir` laid out like a real install

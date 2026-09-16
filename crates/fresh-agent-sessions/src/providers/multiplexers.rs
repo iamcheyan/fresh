@@ -14,10 +14,10 @@
 
 use std::path::PathBuf;
 
-use crate::env::Env;
+use crate::machine::Machine;
 use crate::model::{Confidence, Evidence, Installed, MuxSession, ToolId, ToolReport};
 
-pub fn scan_screen(env: &Env) -> ToolReport {
+pub fn scan_screen(env: &Machine<'_>) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::Screen, "GNU screen");
 
     if let Some(path) = env.which("screen") {
@@ -47,7 +47,7 @@ pub fn scan_screen(env: &Env) -> ToolReport {
     }
 
     for dir in dirs {
-        let Ok(entries) = env.read_dir_sorted(&dir) else {
+        let Ok(entries) = env.list_io(&dir) else {
             continue;
         };
         report
@@ -83,7 +83,7 @@ pub fn scan_screen(env: &Env) -> ToolReport {
     report
 }
 
-pub fn scan_zellij(env: &Env) -> ToolReport {
+pub fn scan_zellij(env: &Machine<'_>) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::Zellij, "zellij");
 
     if let Some(path) = env.which("zellij") {
@@ -107,7 +107,7 @@ pub fn scan_zellij(env: &Env) -> ToolReport {
                 .map(|uid| PathBuf::from(format!("/tmp/zellij-{uid}")))
         })
         .unwrap_or_else(|| PathBuf::from("/nonexistent"));
-    if env.host().is_dir(&runtime) {
+    if env.is_dir(&runtime) {
         report
             .evidence
             .push(Evidence::dir(&runtime).saying("zellij runtime directory"));
@@ -119,7 +119,7 @@ pub fn scan_zellij(env: &Env) -> ToolReport {
         }
     }
 
-    if env.commands_enabled() && env.which("zellij").is_some() {
+    if env.which("zellij").is_some() {
         match env.run("zellij", &["list-sessions", "--no-formatting"]) {
             Ok(output) => {
                 for line in output.lines().filter(|line| !line.trim().is_empty()) {
@@ -161,24 +161,19 @@ pub fn scan_zellij(env: &Env) -> ToolReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::env::StubRunner;
+    use crate::local::LocalTarget;
+    use crate::target::MapTarget;
 
     #[test]
     fn zellij_distinguishes_current_from_merely_running() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let bin = home.path().join("bin");
-        std::fs::create_dir_all(&bin).expect("create bin");
-        std::fs::write(bin.join("zellij"), "#!/bin/sh\n").expect("write");
-
-        let env = Env::fake(home.path()).with_path_dirs([bin]).with_commands(
-            StubRunner::new().returning(
-                "zellij",
-                &["list-sessions", "--no-formatting"],
-                "alpha [Created 1h ago] (current)\n\
-                 beta [Created 2h ago]\n\
-                 gamma [Created 3h ago] (EXITED - attach to resurrect)\n",
-            ),
+        let target = MapTarget::new("m", "/home/remote").with_command(
+            "zellij",
+            &["list-sessions", "--no-formatting"],
+            "alpha [Created 1h ago] (current)\n\
+             beta [Created 2h ago]\n\
+             gamma [Created 3h ago] (EXITED - attach to resurrect)\n",
         );
+        let env = Machine::over(target);
 
         let report = scan_zellij(&env);
 
@@ -198,7 +193,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create");
         std::fs::write(dir.join("4242.pts-3.buildbox"), b"").expect("write socket stand-in");
 
-        let env = Env::fake(home.path()).with_var("SCREENDIR", dir.to_string_lossy());
+        let env = Machine::over(
+            LocalTarget::at(home.path()).with_var("SCREENDIR", dir.to_string_lossy()),
+        );
         let report = scan_screen(&env);
 
         assert_eq!(report.mux_sessions.len(), 1);

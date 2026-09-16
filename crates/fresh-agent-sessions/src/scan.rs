@@ -1,7 +1,16 @@
 //! Running every provider and assembling the result.
 
 use crate::catalog::{scan_store, AGENT_STORES};
-use crate::env::Env;
+use crate::machine::Machine;
+
+/// Wall-clock now, as a unix timestamp. Not taken from the target: this stamps
+/// when the *scan* ran, which is a fact about the caller, not the machine.
+fn now_unix() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
 use crate::model::{Discovery, Installed, ToolId, ToolReport};
 use crate::providers;
 
@@ -36,15 +45,15 @@ impl Default for ScanOptions {
 }
 
 /// Scan with the default options.
-pub fn scan(env: &Env) -> Discovery {
-    scan_with(env, &ScanOptions::default())
+pub fn scan(env: &Machine<'_>) -> Discovery {
+    run(env, &ScanOptions::default())
 }
 
 /// Scan every tool this crate knows about.
 ///
 /// Never fails. A provider that cannot read something records it in that
 /// tool's `problems` and the scan continues — see [`crate::providers`].
-pub fn scan_with(env: &Env, options: &ScanOptions) -> Discovery {
+pub fn run(env: &Machine<'_>, options: &ScanOptions) -> Discovery {
     let limit = options.max_sessions_per_tool;
     let mut tools = vec![
         providers::tmux::scan(env),
@@ -86,8 +95,8 @@ pub fn scan_with(env: &Env, options: &ScanOptions) -> Discovery {
     tools.sort_by_key(|report| report.tool.as_str());
 
     let mut discovery = Discovery {
-        machine: env.machine().to_string(),
-        scanned_at_unix: env.now_unix(),
+        machine: env.name().to_string(),
+        scanned_at_unix: now_unix(),
         tools,
         links: Vec::new(),
     };
@@ -100,12 +109,13 @@ pub fn scan_with(env: &Env, options: &ScanOptions) -> Discovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local::LocalTarget;
     use crate::model::{AgentId, LinkReason};
 
     #[test]
     fn a_bare_machine_yields_an_empty_but_valid_discovery() {
         let home = tempfile::tempdir().expect("tempdir");
-        let discovery = scan(&Env::fake(home.path()));
+        let discovery = scan(&Machine::local(home.path()));
         assert_eq!(discovery.agent_session_count(), 0);
         assert!(discovery.links.is_empty());
     }
@@ -117,7 +127,7 @@ mod tests {
             include_absent: true,
             ..ScanOptions::default()
         };
-        let discovery = scan_with(&Env::fake(home.path()), &options);
+        let discovery = run(&Machine::local(home.path()), &options);
         assert!(
             discovery.tools.len() > 20,
             "expected the full tool list, got {}",
@@ -152,7 +162,7 @@ mod tests {
         )
         .expect("write snapshot");
 
-        let discovery = scan(&Env::fake(home.path()));
+        let discovery = scan(&Machine::local(home.path()));
 
         let exact: Vec<_> = discovery
             .links
@@ -171,7 +181,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create");
         std::fs::write(dir.join("abc123.jsonl"), r#"{"cwd":"/srv/app"}"#).expect("write");
 
-        let discovery = scan(&Env::fake(home.path()));
+        let discovery = scan(&Machine::local(home.path()));
 
         let droid = discovery
             .tools
@@ -210,7 +220,7 @@ mod tests {
         )
         .expect("write transcript");
 
-        let discovery = scan(&Env::fake(home.path()));
+        let discovery = scan(&Machine::local(home.path()));
 
         let workspace_links: Vec<_> = discovery
             .links
@@ -242,7 +252,7 @@ mod tests {
             max_sessions_per_tool: 3,
             ..ScanOptions::default()
         };
-        let discovery = scan_with(&Env::fake(home.path()), &options);
+        let discovery = run(&Machine::local(home.path()), &options);
 
         let claude = discovery
             .tools
@@ -266,9 +276,11 @@ mod tests {
             include_absent: true,
             ..ScanOptions::default()
         };
-        let env = Env::fake(home.path()).with_var("GOOSE_DATA_DIR", "/definitely/not/here");
+        let env = Machine::over(
+            LocalTarget::at(home.path()).with_var("GOOSE_DATA_DIR", "/definitely/not/here"),
+        );
 
-        let discovery = scan_with(&env, &options);
+        let discovery = run(&env, &options);
 
         let goose = discovery
             .tools
@@ -323,7 +335,7 @@ mod tests {
         )
         .expect("write transcript");
 
-        let discovery = scan(&Env::fake(home.path()));
+        let discovery = scan(&Machine::local(home.path()));
 
         let workspace_links: Vec<_> = discovery
             .links
@@ -346,7 +358,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create");
         std::fs::write(dir.join("storage.db"), b"SQLite format 3\0").expect("write");
 
-        let discovery = scan(&Env::fake(home.path()));
+        let discovery = scan(&Machine::local(home.path()));
 
         let opencode = discovery
             .tools
@@ -383,7 +395,7 @@ mod tests {
             max_sessions_per_tool: 2,
             ..ScanOptions::default()
         };
-        let discovery = scan_with(&Env::fake(home.path()), &options);
+        let discovery = run(&Machine::local(home.path()), &options);
 
         let droid = discovery
             .tools
@@ -406,10 +418,9 @@ mod tests {
     /// honest as providers are added.
     #[test]
     fn a_scan_runs_against_a_host_with_no_filesystem_behind_it() {
-        use crate::host::testing::MapHost;
-        use std::sync::Arc;
+        use crate::target::MapTarget;
 
-        let host = MapHost::default()
+        let host = MapTarget::new("build-box", "/home/remote")
             // Claude Code on the remote machine.
             .with_file(
                 "/home/remote/.claude/projects/-srv-api/remote-sess.jsonl",
@@ -430,9 +441,10 @@ mod tests {
                     "value":"remote-sess"}}}}]}]}"#,
             );
 
-        let env = Env::fake("/unused-local-home").with_host(Arc::new(host));
-        assert!(env.is_remote());
-        assert_eq!(env.host_label(), "ssh://test-host");
+        let env = Machine::over(host);
+        // Nothing distinguishes "remote" any more: there is one Target, and
+        // its name is whatever the caller gave it.
+        assert_eq!(env.name(), "build-box");
 
         let discovery = scan(&env);
 
@@ -473,16 +485,14 @@ mod tests {
 
     #[test]
     fn a_remote_host_does_not_leak_this_processs_environment() {
-        use crate::host::testing::MapHost;
-        use std::sync::Arc;
+        use crate::target::MapTarget;
 
-        // The local env says CODEX_HOME is somewhere; the remote host knows
-        // nothing about it. Honouring the local value would send the scan to a
-        // path that does not exist there and label the result as if it did.
-        let host = MapHost::default().with_dir("/home/remote/.codex");
-        let env = Env::fake("/local")
-            .with_var("CODEX_HOME", "/local/elsewhere")
-            .with_host(Arc::new(host));
+        // A target that cannot report the remote environment says None, and
+        // every store then resolves against the remote home. There is no
+        // longer a local environment that *could* leak — that is the point of
+        // there being exactly one Target — so what this pins is the fallback.
+        let host = MapTarget::new("m", "/home/remote").with_dir("/home/remote/.codex");
+        let env = Machine::over(host);
 
         assert_eq!(env.var("CODEX_HOME"), None);
         assert_eq!(
@@ -494,15 +504,12 @@ mod tests {
 
     #[test]
     fn a_host_that_cannot_run_commands_still_reports_what_files_prove() {
-        use crate::host::testing::MapHost;
-        use std::sync::Arc;
+        use crate::target::MapTarget;
 
         // MapHost declines `run`. tmux discovery must degrade to "a socket is
         // here" rather than failing the scan.
-        let host = MapHost::default().with_file("/tmp/tmux-1000/default", "");
-        let env = Env::fake("/local")
-            .with_host(Arc::new(host))
-            .with_commands(crate::env::StubRunner::new());
+        let host = MapTarget::new("m", "/home/remote").with_file("/tmp/tmux-1000/default", "");
+        let env = Machine::over(host);
 
         let discovery = scan(&env);
 
@@ -526,7 +533,7 @@ mod tests {
         std::fs::create_dir_all(&bucket).expect("create bucket");
         std::fs::write(bucket.join("s.jsonl"), r#"{"sessionId":"s","cwd":"/w"}"#).expect("write");
 
-        let discovery = scan(&Env::fake(home.path()));
+        let discovery = scan(&Machine::local(home.path()));
         let json = serde_json::to_string(&discovery).expect("serialize");
         let back: Discovery = serde_json::from_str(&json).expect("deserialize");
 

@@ -38,9 +38,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::env::Env;
-use crate::host::EntryKind;
+use crate::machine::Machine;
 use crate::model::{AgentId, AgentSession, Confidence, Evidence};
+use crate::target::EntryKind;
 
 /// Which files under a root count as sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,23 +170,18 @@ pub struct AgentStore {
 
 impl AgentStore {
     /// The directory to walk, with the variable that moved it (if any).
-    pub fn root(&self, env: &Env) -> (PathBuf, Option<Evidence>) {
+    pub fn root(&self, env: &Machine<'_>) -> (PathBuf, Option<Evidence>) {
         let default = env.home_join(self.base_segments);
-        let mut moved_by = None;
-        for name in self.base_env {
-            if let Some(value) = env.var(name) {
-                if Path::new(&value).is_absolute() {
-                    moved_by = Some(Evidence::env_var(*name, value));
-                    break;
-                }
-            }
-        }
-        let base = env.dir_override(self.base_env, default);
+        let (base, moved_by) = env.dir_override(self.base_env, default);
         let mut root = base;
         for segment in self.suffix {
             root.push(segment);
         }
-        (root, moved_by)
+        let evidence = moved_by.map(|name| {
+            let value = env.var(&name).unwrap_or_default();
+            Evidence::env_var(name, value)
+        });
+        (root, evidence)
     }
 }
 
@@ -503,7 +498,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
 /// fixed either. Both are reported through `problems`.
 pub fn scan_store(
     store: &AgentStore,
-    env: &Env,
+    env: &Machine<'_>,
     limit: usize,
     problems: &mut Vec<String>,
 ) -> StoreScan {
@@ -516,7 +511,7 @@ pub fn scan_store(
         // is installed — `root_exists` below is what says that.
         evidence.push(moved);
     }
-    if !env.host().is_dir(&root) {
+    if !env.is_dir(&root) {
         return StoreScan {
             root_exists: false,
             sessions: Vec::new(),
@@ -591,7 +586,7 @@ pub struct StoreScan {
 
 /// The fixed half of a walk: everything that does not change as it recurses.
 struct Walk<'a> {
-    env: &'a Env,
+    env: &'a Machine<'a>,
     root: &'a Path,
     store: &'a AgentStore,
     limit: usize,
@@ -609,7 +604,7 @@ fn collect_files(
     }
     // Sorted, so a truncated scan is at least deterministic rather than
     // whatever order the host handed back.
-    let entries = match walk.env.read_dir_sorted(dir) {
+    let entries = match walk.env.list_io(dir) {
         Ok(entries) => entries,
         Err(err) => {
             problems.push(format!("{}: {err}", dir.display()));
@@ -652,7 +647,7 @@ fn matches_file(store: &AgentStore, root: &Path, path: &Path) -> bool {
 }
 
 fn session_from_transcript(
-    env: &Env,
+    env: &Machine<'_>,
     store: &AgentStore,
     root: &Path,
     path: PathBuf,
@@ -690,7 +685,7 @@ fn session_from_transcript(
 /// to megabytes, and the working directory is written in the header record. A
 /// scan that parsed every line to find it would read the user's entire agent
 /// history off disk to build a list.
-pub fn read_cwd_field(env: &Env, path: &Path, fields: &[&str]) -> Option<PathBuf> {
+pub fn read_cwd_field(env: &Machine<'_>, path: &Path, fields: &[&str]) -> Option<PathBuf> {
     if fields.is_empty() {
         return None;
     }
@@ -707,8 +702,8 @@ pub fn read_cwd_field(env: &Env, path: &Path, fields: &[&str]) -> Option<PathBuf
 }
 
 /// Read at most `max_bytes` of `path`, stopping at the first newline.
-pub fn read_first_line(env: &Env, path: &Path, max_bytes: usize) -> Option<String> {
-    let bytes = env.host().read_file_prefix(path, max_bytes).ok()?;
+pub fn read_first_line(env: &Machine<'_>, path: &Path, max_bytes: usize) -> Option<String> {
+    let bytes = env.read_prefix_io(path, max_bytes).ok()?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     // A JSON file (not JSONL) has no newline before its closing brace, so fall
     // back to the whole buffer rather than returning nothing.

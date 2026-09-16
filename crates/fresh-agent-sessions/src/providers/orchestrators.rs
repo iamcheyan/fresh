@@ -44,14 +44,15 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::env::{Env, Platform};
+use crate::machine::Machine;
 use crate::model::{Confidence, Evidence, Installed, ToolId, ToolReport, Workspace};
+use crate::target::Platform;
 
 // ---------------------------------------------------------------- Orca
 
 /// Orca's user-data directory: `$ORCA_USER_DATA`, `$XDG_DATA_HOME/Orca`, or
 /// `~/.orca`.
-pub fn orca_user_data(env: &Env) -> PathBuf {
+pub fn orca_user_data(env: &Machine<'_>) -> PathBuf {
     if let Some(explicit) = env.var("ORCA_USER_DATA").map(PathBuf::from) {
         if explicit.is_absolute() {
             return explicit;
@@ -63,7 +64,7 @@ pub fn orca_user_data(env: &Env) -> PathBuf {
     }
 }
 
-pub fn scan_orca(env: &Env) -> ToolReport {
+pub fn scan_orca(env: &Machine<'_>) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::Orca, "Orca");
     let data = orca_user_data(env);
 
@@ -74,7 +75,7 @@ pub fn scan_orca(env: &Env) -> ToolReport {
             executable: Some(path),
         };
     }
-    if !env.host().is_dir(&data) {
+    if !env.is_dir(&data) {
         return report;
     }
     report
@@ -98,7 +99,7 @@ pub fn scan_orca(env: &Env) -> ToolReport {
         ("keybindings.json", "user keybindings"),
     ] {
         let path = data.join(relative);
-        if env.host().exists(&path) {
+        if env.exists(&path) {
             report.evidence.push(Evidence::dir(&path).saying(meaning));
         }
     }
@@ -115,10 +116,10 @@ pub fn scan_orca(env: &Env) -> ToolReport {
 /// than reimplement that indirection, this looks for the JSON files that
 /// actually parse as state — a profile added by a newer Orca is then found for
 /// free, where a hard-coded filename would miss it.
-fn profile_state_files(env: &Env, data: &Path) -> Vec<PathBuf> {
+fn profile_state_files(env: &Machine<'_>, data: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     for dir in [data.to_path_buf(), data.join("profiles")] {
-        let Ok(entries) = env.read_dir_sorted(&dir) else {
+        let Ok(entries) = env.list_io(&dir) else {
             continue;
         };
         candidates.extend(
@@ -131,12 +132,12 @@ fn profile_state_files(env: &Env, data: &Path) -> Vec<PathBuf> {
     candidates
 }
 
-fn read_orca_state(env: &Env, path: &Path, report: &mut ToolReport) {
+fn read_orca_state(env: &Machine<'_>, path: &Path, report: &mut ToolReport) {
     const MAX_STATE_BYTES: usize = 8 * 1024 * 1024;
-    let Ok(bytes) = env.host().read_file_prefix(path, MAX_STATE_BYTES) else {
+    let Ok(bytes) = env.read_prefix_io(path, MAX_STATE_BYTES) else {
         return;
     };
-    let text = String::from_utf8_lossy(&bytes);
+    let text = String::from_utf8_lossy(bytes.as_slice());
     let Ok(state) = serde_json::from_str::<OrcaState>(&text) else {
         return;
     };
@@ -223,7 +224,7 @@ struct OrcaWorktreeMeta {
 
 // ------------------------------------------------------------ Superset
 
-pub fn scan_superset(env: &Env) -> ToolReport {
+pub fn scan_superset(env: &Machine<'_>) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::Superset, "Superset");
     let root = env.home_join([".superset"]);
 
@@ -232,7 +233,7 @@ pub fn scan_superset(env: &Env) -> ToolReport {
     let shim = root.join("bin").join("superset");
     if let Some(path) = env
         .which("superset")
-        .or_else(|| env.host().is_file(&shim).then(|| shim.clone()))
+        .or_else(|| env.is_file(&shim).then(|| shim.clone()))
     {
         report.evidence.push(Evidence::executable(&path));
         report.installed = Installed::Present {
@@ -240,7 +241,7 @@ pub fn scan_superset(env: &Env) -> ToolReport {
             executable: Some(path),
         };
     }
-    if !env.host().is_dir(&root) {
+    if !env.is_dir(&root) {
         return report;
     }
     report
@@ -254,7 +255,7 @@ pub fn scan_superset(env: &Env) -> ToolReport {
     }
 
     let config = root.join("config.json");
-    if env.host().is_file(&config) {
+    if env.is_file(&config) {
         // Named, never read: this file holds a session token.
         report.evidence.push(
             Evidence::file(&config)
@@ -263,19 +264,20 @@ pub fn scan_superset(env: &Env) -> ToolReport {
     }
 
     // A running host server per organization.
-    if let Ok(orgs) = env.read_dir_sorted(&root.join("host")) {
+    if let Ok(orgs) = env.list_io(&root.join("host")) {
         for org in orgs.into_iter().map(|entry| entry.path) {
             let manifest = org.join("manifest.json");
-            if !env.host().is_file(&manifest) {
+            if !env.is_file(&manifest) {
                 continue;
             }
             // 64KiB: a manifest is an endpoint and a token. The cap also keeps
             // this from slurping whatever else ends up under that name.
             let endpoint = env
-                .host()
-                .read_file_prefix(&manifest, 64 * 1024)
+                .read_prefix_io(&manifest, 64 * 1024)
                 .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|bytes| {
+                    serde_json::from_slice::<serde_json::Value>(bytes.as_slice()).ok()
+                })
                 .and_then(|value| {
                     value
                         .get("endpoint")
@@ -295,10 +297,10 @@ pub fn scan_superset(env: &Env) -> ToolReport {
     }
 
     // Project-less workspaces: one managed directory each, its own git repo.
-    if let Ok(entries) = env.read_dir_sorted(&root.join("sessions")) {
+    if let Ok(entries) = env.list_io(&root.join("sessions")) {
         for dir in entries
             .into_iter()
-            .filter(|entry| entry.kind == crate::host::EntryKind::Dir)
+            .filter(|entry| entry.kind == crate::target::EntryKind::Dir)
             .map(|entry| entry.path)
         {
             let name = dir
@@ -327,7 +329,7 @@ pub fn scan_superset(env: &Env) -> ToolReport {
 
 // --------------------------------------------------- super.engineering
 
-pub fn scan_super_engineering(env: &Env) -> ToolReport {
+pub fn scan_super_engineering(env: &Machine<'_>) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::SuperEngineering, "super.engineering");
 
     if let Some(path) = env.which("sc") {
@@ -354,7 +356,7 @@ pub fn scan_super_engineering(env: &Env) -> ToolReport {
     let support = env.home_join(["Library", "Application Support"]);
     for name in ["super", "Super", "engineering.super.app", "sh.super.app"] {
         let dir = support.join(name);
-        if env.host().is_dir(&dir) {
+        if env.is_dir(&dir) {
             report.evidence.push(
                 Evidence::dir(&dir).saying("super.engineering application support directory"),
             );
@@ -367,7 +369,7 @@ pub fn scan_super_engineering(env: &Env) -> ToolReport {
 
     for bundle in ["/Applications/Super.app", "/Applications/super.app"] {
         let path = Path::new(bundle);
-        if env.host().exists(path) {
+        if env.exists(path) {
             report
                 .evidence
                 .push(Evidence::dir(path).saying("application bundle"));
@@ -380,7 +382,7 @@ pub fn scan_super_engineering(env: &Env) -> ToolReport {
 
     // The app's own store is undocumented and not shipped as source, so rather
     // than guess at a schema, ask the CLI it ships for exactly this purpose.
-    if env.commands_enabled() && env.which("sc").is_some() {
+    if env.which("sc").is_some() {
         match env.run("sc", &["worktree", "list", "--json"]) {
             Ok(output) => read_sc_worktrees(&output, &mut report),
             Err(err) => report.note_problem(format!("sc worktree list --json: {err}")),
@@ -468,7 +470,8 @@ fn path_from_file_url(url: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::env::StubRunner;
+    use crate::local::LocalTarget;
+    use crate::target::MapTarget;
 
     #[test]
     fn orca_reads_worktrees_out_of_persisted_state() {
@@ -488,7 +491,7 @@ mod tests {
         )
         .expect("write state");
 
-        let report = scan_orca(&Env::fake(home.path()));
+        let report = scan_orca(&Machine::local(home.path()));
 
         assert_eq!(report.workspaces.len(), 1);
         let workspace = &report.workspaces[0];
@@ -505,7 +508,7 @@ mod tests {
         std::fs::create_dir_all(&data).expect("create");
         std::fs::write(data.join("keybindings.json"), r#"{"cmd+k": "quickOpen"}"#).expect("write");
 
-        let report = scan_orca(&Env::fake(home.path()));
+        let report = scan_orca(&Machine::local(home.path()));
 
         assert!(report.workspaces.is_empty());
         assert!(
@@ -524,16 +527,20 @@ mod tests {
         let explicit = root.path().join("explicit");
         let xdg = root.path().join("xdg");
 
-        let env = Env::fake(root.path())
-            .with_var("XDG_DATA_HOME", xdg.to_string_lossy())
-            .with_var("ORCA_USER_DATA", explicit.to_string_lossy());
+        let env = Machine::over(
+            LocalTarget::at(root.path())
+                .with_var("XDG_DATA_HOME", xdg.to_string_lossy())
+                .with_var("ORCA_USER_DATA", explicit.to_string_lossy()),
+        );
         assert_eq!(orca_user_data(&env), explicit);
 
-        let env = Env::fake(root.path()).with_var("XDG_DATA_HOME", xdg.to_string_lossy());
+        let env = Machine::over(
+            LocalTarget::at(root.path()).with_var("XDG_DATA_HOME", xdg.to_string_lossy()),
+        );
         assert_eq!(orca_user_data(&env), xdg.join("Orca"));
 
         assert_eq!(
-            orca_user_data(&Env::fake(root.path())),
+            orca_user_data(&Machine::local(root.path())),
             root.path().join(".orca")
         );
     }
@@ -549,7 +556,7 @@ mod tests {
         )
         .expect("write manifest");
 
-        let report = scan_superset(&Env::fake(home.path()));
+        let report = scan_superset(&Machine::local(home.path()));
 
         let manifest = report
             .evidence
@@ -570,7 +577,7 @@ mod tests {
         let sessions = home.path().join(".superset").join("sessions");
         std::fs::create_dir_all(sessions.join("quick-fix")).expect("create");
 
-        let report = scan_superset(&Env::fake(home.path()));
+        let report = scan_superset(&Machine::local(home.path()));
 
         assert_eq!(report.workspaces.len(), 1);
         assert_eq!(report.workspaces[0].name.as_deref(), Some("quick-fix"));
@@ -580,7 +587,9 @@ mod tests {
     #[test]
     fn super_engineering_off_macos_is_unsupported_not_absent() {
         let home = tempfile::tempdir().expect("tempdir");
-        let report = scan_super_engineering(&Env::fake(home.path()).with_platform(Platform::Linux));
+        let report = scan_super_engineering(&Machine::over(
+            LocalTarget::at(home.path()).with_platform(Platform::Linux),
+        ));
         assert!(
             matches!(report.installed, Installed::Unsupported { .. }),
             "got {:?}",
@@ -590,20 +599,13 @@ mod tests {
 
     #[test]
     fn super_engineering_reads_the_sc_cli_worktree_contract() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let bin = home.path().join("bin");
-        std::fs::create_dir_all(&bin).expect("create bin");
-        std::fs::write(bin.join("sc"), "#!/bin/sh\n").expect("write sc");
-
-        let env = Env::fake(home.path())
-            .with_platform(Platform::MacOs)
-            .with_path_dirs([bin])
-            .with_commands(StubRunner::new().returning(
-                "sc",
-                &["worktree", "list", "--json"],
-                r#"[{"type":"worktree","id":"w1","url":"file:///src/a","primary":true},
-                    {"type":"worktree","id":"w2","url":"file:///src/b","primary":false}]"#,
-            ));
+        let target = MapTarget::new("m", "/home/remote").with_command(
+            "sc",
+            &["worktree", "list", "--json"],
+            r#"[{"type":"worktree","id":"w1","url":"file:///src/a","primary":true},
+                {"type":"worktree","id":"w2","url":"file:///src/b","primary":false}]"#,
+        );
+        let env = Machine::over(ScTarget(target));
 
         let report = scan_super_engineering(&env);
 
@@ -619,6 +621,43 @@ mod tests {
             Some(Path::new("/src/a")),
             "without a path the workspace can never correlate with a session"
         );
+    }
+
+    /// A macOS target that has `sc` on its PATH. Wrapping rather than
+    /// extending MapTarget keeps that fixture free of per-test special cases.
+    #[derive(Debug)]
+    struct ScTarget(MapTarget);
+
+    impl crate::target::Target for ScTarget {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn home(&self) -> PathBuf {
+            self.0.home()
+        }
+        fn walk(
+            &self,
+            root: &Path,
+            opts: &crate::target::WalkOpts,
+            cancel: &std::sync::atomic::AtomicBool,
+        ) -> std::io::Result<Vec<crate::target::Entry>> {
+            self.0.walk(root, opts, cancel)
+        }
+        fn read_prefix(&self, path: &Path, max_bytes: usize) -> std::io::Result<Vec<u8>> {
+            self.0.read_prefix(path, max_bytes)
+        }
+        fn stat(&self, path: &Path) -> Option<crate::target::Entry> {
+            self.0.stat(path)
+        }
+        fn platform(&self) -> Platform {
+            Platform::MacOs
+        }
+        fn which(&self, program: &str) -> Option<PathBuf> {
+            (program == "sc").then(|| PathBuf::from("/usr/local/bin/sc"))
+        }
+        fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
+            self.0.run(program, args)
+        }
     }
 
     #[test]

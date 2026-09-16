@@ -31,15 +31,16 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::env::Env;
+use crate::machine::Machine;
 use crate::model::{AgentId, AgentSession, Confidence, Evidence, Installed, ToolId, ToolReport};
 
 /// `$CODEX_HOME`, or `~/.codex`.
-pub fn codex_home(env: &Env) -> PathBuf {
+pub fn codex_home(env: &Machine<'_>) -> PathBuf {
     env.dir_override(&["CODEX_HOME"], env.home_join([".codex"]))
+        .0
 }
 
-pub fn scan(env: &Env, limit: usize) -> ToolReport {
+pub fn scan(env: &Machine<'_>, limit: usize) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::CodexCli, "Codex CLI");
     let home = codex_home(env);
 
@@ -71,7 +72,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
             executable: Some(path),
         };
     }
-    if !env.host().is_dir(&home) {
+    if !env.is_dir(&home) {
         return report;
     }
     report
@@ -87,7 +88,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
     // The index maps session id to title; without it sessions are still
     // discoverable, just untitled.
     let index_path = home.join("session_index.jsonl");
-    let titles = if env.host().is_file(&index_path) {
+    let titles = if env.is_file(&index_path) {
         report
             .evidence
             .push(Evidence::file(&index_path).saying("session id to title index"));
@@ -97,7 +98,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
     };
 
     let state_db = home.join("state_5.sqlite");
-    if env.host().is_file(&state_db) {
+    if env.is_file(&state_db) {
         report.evidence.push(
             Evidence::file(&state_db)
                 .saying("Codex desktop metadata (SQLite; present but not parsed)"),
@@ -105,7 +106,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
     }
 
     let sessions_dir = home.join("sessions");
-    if !env.host().is_dir(&sessions_dir) {
+    if !env.is_dir(&sessions_dir) {
         return report;
     }
     report
@@ -123,17 +124,17 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
 }
 
 /// The Codex desktop app's own report: presence only, sessions shared.
-pub fn desktop_report(env: &Env) -> ToolReport {
+pub fn desktop_report(env: &Machine<'_>) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::CodexDesktop, "Codex Desktop");
     let home = codex_home(env);
     let state_db = home.join("state_5.sqlite");
 
     let bundle = match env.platform() {
-        crate::env::Platform::MacOs => Some(PathBuf::from("/Applications/Codex.app")),
+        crate::target::Platform::MacOs => Some(PathBuf::from("/Applications/Codex.app")),
         _ => None,
     };
 
-    if let Some(bundle) = bundle.filter(|path| env.host().exists(path)) {
+    if let Some(bundle) = bundle.filter(|path| env.exists(path)) {
         report
             .evidence
             .push(Evidence::dir(&bundle).saying("Codex desktop application bundle"));
@@ -141,7 +142,7 @@ pub fn desktop_report(env: &Env) -> ToolReport {
             version: None,
             executable: Some(bundle),
         };
-    } else if env.host().is_file(&state_db) {
+    } else if env.is_file(&state_db) {
         // The state database is the desktop app's own file; the CLI does not
         // write it. Its presence is the strongest signal available off macOS.
         report.evidence.push(
@@ -152,7 +153,7 @@ pub fn desktop_report(env: &Env) -> ToolReport {
             version: None,
             executable: None,
         };
-    } else if env.platform() != crate::env::Platform::MacOs {
+    } else if env.platform() != crate::target::Platform::MacOs {
         report.installed = Installed::Unsupported {
             reason: "Codex Desktop ships for macOS; nothing to inspect from this platform"
                 .to_string(),
@@ -170,7 +171,7 @@ pub fn desktop_report(env: &Env) -> ToolReport {
 
 /// Walk the `YYYY/MM/DD` shards newest-first, stopping at `limit` files.
 fn collect_newest_rollouts(
-    env: &Env,
+    env: &Machine<'_>,
     dir: &Path,
     depth: usize,
     limit: usize,
@@ -183,7 +184,7 @@ fn collect_newest_rollouts(
     if out.len() >= limit {
         return;
     }
-    let mut children = match env.read_dir_sorted(dir) {
+    let mut children = match env.list_io(dir) {
         Ok(children) => children,
         Err(err) => {
             report.note_problem(format!("{}: {err}", dir.display()));
@@ -199,7 +200,7 @@ fn collect_newest_rollouts(
             return;
         }
         if depth < DATE_DEPTH {
-            if entry.kind == crate::host::EntryKind::Dir {
+            if entry.kind == crate::target::EntryKind::Dir {
                 collect_newest_rollouts(env, &entry.path, depth + 1, limit, out, report);
             }
             continue;
@@ -244,7 +245,11 @@ fn is_uuid_shaped(value: &str) -> bool {
             .all(|group| group.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
-fn session_from_rollout(env: &Env, path: &Path, titles: &[(String, String)]) -> AgentSession {
+fn session_from_rollout(
+    env: &Machine<'_>,
+    path: &Path,
+    titles: &[(String, String)],
+) -> AgentSession {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -279,16 +284,16 @@ fn session_from_rollout(env: &Env, path: &Path, titles: &[(String, String)]) -> 
 }
 
 /// `(session id, title)` pairs from `session_index.jsonl`.
-fn read_index_titles(env: &Env, path: &Path) -> Vec<(String, String)> {
+fn read_index_titles(env: &Machine<'_>, path: &Path) -> Vec<(String, String)> {
     const MAX_RECORDS: usize = 20_000;
     /// The index is one short record per session; 4MiB is thousands of them
     /// and keeps the remote case from pulling an unbounded file.
     const MAX_BYTES: usize = 4 * 1024 * 1024;
 
-    let Ok(bytes) = env.host().read_file_prefix(path, MAX_BYTES) else {
+    let Ok(bytes) = env.read_prefix_io(path, MAX_BYTES) else {
         return Vec::new();
     };
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let text = String::from_utf8_lossy(bytes.as_slice()).into_owned();
     text.lines()
         .take(MAX_RECORDS)
         .filter_map(|line| {
@@ -313,6 +318,7 @@ fn read_index_titles(env: &Env, path: &Path) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local::LocalTarget;
 
     const UUID: &str = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 
@@ -369,7 +375,7 @@ mod tests {
             );
         }
 
-        let report = scan(&Env::fake(home.path()), 2);
+        let report = scan(&Machine::local(home.path()), 2);
 
         assert_eq!(report.agent_sessions.len(), 2, "honours the limit");
         let paths: Vec<String> = report
@@ -412,7 +418,7 @@ mod tests {
         )
         .expect("write index");
 
-        let report = scan(&Env::fake(home.path()), 10);
+        let report = scan(&Machine::local(home.path()), 10);
 
         assert_eq!(
             report.agent_sessions[0].title.as_deref(),
@@ -447,7 +453,9 @@ mod tests {
         )
         .expect("write");
 
-        let env = Env::fake(root.path()).with_var("CODEX_HOME", elsewhere.to_string_lossy());
+        let env = Machine::over(
+            LocalTarget::at(root.path()).with_var("CODEX_HOME", elsewhere.to_string_lossy()),
+        );
         let report = scan(&env, 10);
 
         assert_eq!(report.agent_sessions.len(), 1);
@@ -457,7 +465,8 @@ mod tests {
     #[test]
     fn a_relative_codex_home_is_ignored_not_resolved_against_the_cwd() {
         let home = tempfile::tempdir().expect("tempdir");
-        let env = Env::fake(home.path()).with_var("CODEX_HOME", "relative/path");
+        let env =
+            Machine::over(LocalTarget::at(home.path()).with_var("CODEX_HOME", "relative/path"));
         assert_eq!(codex_home(&env), home.path().join(".codex"));
     }
 
@@ -467,7 +476,8 @@ mod tests {
         // provenance lie, in a crate whose entire premise is provenance.
         let home = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(home.path().join(".codex")).expect("create");
-        let env = Env::fake(home.path()).with_var("CODEX_HOME", "relative/path");
+        let env =
+            Machine::over(LocalTarget::at(home.path()).with_var("CODEX_HOME", "relative/path"));
 
         let report = scan(&env, 10);
 
@@ -490,7 +500,7 @@ mod tests {
         std::fs::write(home.path().join(".codex").join("state_5.sqlite"), b"SQLite")
             .expect("write");
 
-        let desktop = desktop_report(&Env::fake(home.path()));
+        let desktop = desktop_report(&Machine::local(home.path()));
 
         assert!(matches!(desktop.installed, Installed::Present { .. }));
         assert!(

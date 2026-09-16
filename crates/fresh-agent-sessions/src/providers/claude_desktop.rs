@@ -23,11 +23,12 @@
 
 use std::path::PathBuf;
 
-use crate::env::{Env, Platform};
+use crate::machine::Machine;
 use crate::model::{Evidence, Installed, ToolId, ToolReport};
+use crate::target::Platform;
 
 /// The application-support directory for `app`, per platform.
-pub fn app_support_dir(env: &Env, app: &str) -> PathBuf {
+pub fn app_support_dir(env: &Machine<'_>, app: &str) -> PathBuf {
     match env.platform() {
         Platform::MacOs => env.home_join(["Library", "Application Support", app]),
         Platform::Windows => env
@@ -45,11 +46,11 @@ pub fn app_support_dir(env: &Env, app: &str) -> PathBuf {
     }
 }
 
-pub fn scan(env: &Env) -> ToolReport {
+pub fn scan(env: &Machine<'_>) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::ClaudeDesktop, "Claude Desktop");
     let dir = app_support_dir(env, "Claude");
 
-    if !env.host().is_dir(&dir) {
+    if !env.is_dir(&dir) {
         return report;
     }
     report
@@ -61,15 +62,14 @@ pub fn scan(env: &Env) -> ToolReport {
     };
 
     let config = dir.join("claude_desktop_config.json");
-    if !env.host().is_file(&config) {
+    if !env.is_file(&config) {
         return report;
     }
 
     let servers = env
-        .host()
-        .read_file_prefix(&config, 1024 * 1024)
+        .read_prefix_io(&config, 1024 * 1024)
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes.as_slice()).ok())
         .and_then(|value| {
             value
                 .get("mcpServers")
@@ -100,6 +100,7 @@ pub fn scan(env: &Env) -> ToolReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local::LocalTarget;
 
     #[test]
     fn names_the_mcp_servers_the_app_launches() {
@@ -112,7 +113,9 @@ mod tests {
         )
         .expect("write config");
 
-        let report = scan(&Env::fake(home.path()).with_platform(Platform::Linux));
+        let report = scan(&Machine::over(
+            LocalTarget::at(home.path()).with_platform(Platform::Linux),
+        ));
 
         let detail = report
             .evidence
@@ -131,7 +134,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create");
         std::fs::write(dir.join("claude_desktop_config.json"), "{}").expect("write");
 
-        let report = scan(&Env::fake(home.path()).with_platform(Platform::Linux));
+        let report = scan(&Machine::over(
+            LocalTarget::at(home.path()).with_platform(Platform::Linux),
+        ));
 
         assert!(report.agent_sessions.is_empty());
         assert!(
@@ -145,7 +150,7 @@ mod tests {
     fn app_support_dir_differs_per_platform() {
         let home = tempfile::tempdir().expect("tempdir");
         let mac = app_support_dir(
-            &Env::fake(home.path()).with_platform(Platform::MacOs),
+            &Machine::over(LocalTarget::at(home.path()).with_platform(Platform::MacOs)),
             "Claude",
         );
         assert!(
@@ -154,7 +159,7 @@ mod tests {
         );
 
         let linux = app_support_dir(
-            &Env::fake(home.path()).with_platform(Platform::Linux),
+            &Machine::over(LocalTarget::at(home.path()).with_platform(Platform::Linux)),
             "Claude",
         );
         assert!(linux.ends_with(".config/Claude"), "{linux:?}");

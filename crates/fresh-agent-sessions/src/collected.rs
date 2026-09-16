@@ -19,12 +19,13 @@
 //! appended into a single list:
 //!
 //! ```no_run
-//! # use std::sync::Arc;
-//! use fresh_agent_sessions::{collect, scan, Env, Host};
-//! # fn hosts() -> Vec<Arc<dyn Host>> { Vec::new() }
+//! use fresh_agent_sessions::{collect_sessions, Target};
+//! # use std::sync::atomic::AtomicBool;
+//! # fn configured() -> Vec<Box<dyn Target>> { Vec::new() }
+//! let cancel = AtomicBool::new(false);
 //! let mut rows = Vec::new();
-//! for host in hosts() {
-//!     rows.extend(collect(&scan(&Env::from_process().with_host(host))));
+//! for target in configured() {
+//!     rows.extend(collect_sessions(target.as_ref(), &cancel).sessions);
 //! }
 //! rows.sort_by_key(|row| std::cmp::Reverse(row.last_active_unix));
 //! ```
@@ -515,14 +516,14 @@ fn split_host(host: &str) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::testing::MapHost;
-    use crate::{scan, Env};
-    use std::sync::Arc;
+    use crate::machine::Machine;
+    use crate::scan;
+    use crate::target::MapTarget;
 
     /// A machine with a Claude session, a Herdr pane naming it, and a second
     /// tmux-shaped pane with no transcript behind it.
-    fn machine(name: &str) -> Env {
-        let host = MapHost::default()
+    fn machine(name: &str) -> Machine<'static> {
+        let host = MapTarget::new(name, "/home/remote")
             .with_file(
                 "/home/remote/.claude/projects/-srv-api/sess-1.jsonl",
                 r#"{"sessionId":"sess-1","cwd":"/srv/api","gitBranch":"deploy","version":"2.1.273"}"#,
@@ -536,14 +537,12 @@ mod tests {
                       "1":{"cwd":"/srv/other","managed_agent_kind":"codex"}
                     }}]}]}"#,
             );
-        Env::fake("/unused")
-            .with_host(Arc::new(host))
-            .with_machine(name)
+        Machine::over(host)
     }
 
     #[test]
     fn a_conversation_and_the_pane_running_it_are_one_row() {
-        let rows = collect(&scan(&machine("build-box")));
+        let rows = collect(&scan::scan(&machine("build-box")));
 
         let claude: Vec<_> = rows
             .iter()
@@ -576,7 +575,7 @@ mod tests {
     fn a_pane_with_no_transcript_still_gets_a_row() {
         // Otherwise a dock reports a machine as idle while an agent is
         // visibly running on it.
-        let rows = collect(&scan(&machine("build-box")));
+        let rows = collect(&scan::scan(&machine("build-box")));
 
         let codex: Vec<_> = rows
             .iter()
@@ -595,8 +594,8 @@ mod tests {
     fn rows_from_two_machines_concatenate_without_colliding() {
         // The same session id on two machines is ordinary: a repo cloned
         // twice, or a home directory on shared storage.
-        let mut rows = collect(&scan(&machine("build-box")));
-        rows.extend(collect(&scan(&machine("laptop"))));
+        let mut rows = collect(&scan::scan(&machine("build-box")));
+        rows.extend(collect(&scan::scan(&machine("laptop"))));
 
         let keys: BTreeSet<String> = rows.iter().map(|row| row.key.to_string()).collect();
         assert_eq!(keys.len(), rows.len(), "every key must stay unique");
@@ -616,15 +615,13 @@ mod tests {
 
     #[test]
     fn a_session_nothing_hosts_is_still_attributed_to_its_own_tool() {
-        let host = MapHost::default().with_file(
+        let host = MapTarget::new("m", "/home/remote").with_file(
             "/home/remote/.claude/projects/-x/lonely.jsonl",
             r#"{"sessionId":"lonely","cwd":"/x"}"#,
         );
-        let env = Env::fake("/unused")
-            .with_host(Arc::new(host))
-            .with_machine("m");
+        let env = Machine::over(host);
 
-        let rows = collect(&scan(&env));
+        let rows = collect(&scan::scan(&env));
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].owner.kind, OwnerKind::Unhosted);
@@ -635,8 +632,8 @@ mod tests {
     #[test]
     fn rows_are_newest_first_and_stable_between_scans() {
         let env = machine("m");
-        let first = collect(&scan(&env));
-        let second = collect(&scan(&env));
+        let first = collect(&scan::scan(&env));
+        let second = collect(&scan::scan(&env));
         let keys = |rows: &[CollectedSession]| {
             rows.iter()
                 .map(|row| row.key.to_string())
@@ -656,7 +653,7 @@ mod tests {
 
     #[test]
     fn a_row_answers_on_its_own_without_the_discovery() {
-        let rows = collect(&scan(&machine("build-box")));
+        let rows = collect(&scan::scan(&machine("build-box")));
         let row = rows
             .iter()
             .find(|row| row.agent == Some(AgentId::Claude))
@@ -680,7 +677,7 @@ mod tests {
 
     #[test]
     fn a_worktree_owner_carries_its_checkout_and_repo() {
-        let host = MapHost::default()
+        let host = MapTarget::new("m", "/home/remote")
             .with_file(
                 "/home/remote/.orca/state.json",
                 r#"{"schemaVersion":1,"repos":[{"id":"r","path":"/src/repo"}],
@@ -690,11 +687,9 @@ mod tests {
                 "/home/remote/.claude/projects/-w/s.jsonl",
                 r#"{"sessionId":"s","cwd":"/src/repo/.worktrees/feat"}"#,
             );
-        let env = Env::fake("/unused")
-            .with_host(Arc::new(host))
-            .with_machine("m");
+        let env = Machine::over(host);
 
-        let rows = collect(&scan(&env));
+        let rows = collect(&scan::scan(&env));
         let row = &rows[0];
 
         assert_eq!(row.owner.kind, OwnerKind::Orchestrator);

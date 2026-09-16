@@ -42,7 +42,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::env::Env;
+use crate::machine::Machine;
 use crate::model::{AgentId, AgentSession, Confidence, Evidence, Installed, ToolId, ToolReport};
 
 /// Encode a working directory the way Claude Code names its project bucket.
@@ -85,12 +85,12 @@ impl Header {
     }
 }
 
-pub fn scan(env: &Env, limit: usize) -> ToolReport {
+pub fn scan(env: &Machine<'_>, limit: usize) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::ClaudeCode, "Claude Code");
 
-    let home = env.dir_override(&["CLAUDE_CONFIG_DIR"], env.home_join([".claude"]));
+    let (home, _moved) = env.dir_override(&["CLAUDE_CONFIG_DIR"], env.home_join([".claude"]));
     let settings = env.home_join([".claude.json"]);
-    if env.host().is_file(&settings) {
+    if env.is_file(&settings) {
         report.evidence.push(
             Evidence::file(&settings)
                 .saying("Claude Code global settings; presence proves install"),
@@ -109,7 +109,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
     }
 
     let projects = home.join("projects");
-    if !env.host().is_dir(&projects) {
+    if !env.is_dir(&projects) {
         return report;
     }
     report
@@ -132,7 +132,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
 
     let mut truncated = false;
     for bucket in buckets {
-        if !env.host().is_dir(&bucket) {
+        if !env.is_dir(&bucket) {
             continue;
         }
         if scan_bucket(env, &bucket, limit, &mut report) {
@@ -162,7 +162,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
 /// ride along with the parent that owns them. Counting rows would let one
 /// heavily-delegating session exhaust the whole budget by itself and return a
 /// page with a single resumable entry on it.
-fn scan_bucket(env: &Env, bucket: &Path, limit: usize, report: &mut ToolReport) -> bool {
+fn scan_bucket(env: &Machine<'_>, bucket: &Path, limit: usize, report: &mut ToolReport) -> bool {
     let entries = match read_sorted_dir(env, bucket) {
         Ok(entries) => entries,
         Err(err) => {
@@ -181,7 +181,7 @@ fn scan_bucket(env: &Env, bucket: &Path, limit: usize, report: &mut ToolReport) 
         let session = read_session(env, &path, bucket, false);
         // The sibling directory named after the session holds its sub-agents.
         let subagent_dir = path.with_extension("");
-        if env.host().is_dir(&subagent_dir) {
+        if env.is_dir(&subagent_dir) {
             if let Ok(children) = read_sorted_dir(env, &subagent_dir) {
                 for child in children {
                     if child.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
@@ -218,7 +218,7 @@ fn scan_bucket(env: &Env, bucket: &Path, limit: usize, report: &mut ToolReport) 
     false
 }
 
-fn read_session(env: &Env, path: &Path, bucket: &Path, is_subagent: bool) -> AgentSession {
+fn read_session(env: &Machine<'_>, path: &Path, bucket: &Path, is_subagent: bool) -> AgentSession {
     let header = read_header(env, path);
     let bucket_name = bucket
         .file_name()
@@ -271,17 +271,17 @@ fn read_session(env: &Env, path: &Path, bucket: &Path, is_subagent: bool) -> Age
 /// The budget is a line count, not a byte count, because a single record can
 /// legitimately be a megabyte — one tool result with a large stdout — and a
 /// byte budget would stop mid-record and find nothing.
-fn read_header(env: &Env, path: &Path) -> Header {
+fn read_header(env: &Machine<'_>, path: &Path) -> Header {
     const MAX_RECORDS: usize = 32;
     /// Enough for the header records of every transcript seen, and a bound the
     /// remote case needs: without it a scan pulls whole transcripts across the
     /// network to read their first few fields.
     const MAX_BYTES: usize = 256 * 1024;
 
-    let Ok(bytes) = env.host().read_file_prefix(path, MAX_BYTES) else {
+    let Ok(bytes) = env.read_prefix_io(path, MAX_BYTES) else {
         return Header::default();
     };
-    let text = String::from_utf8_lossy(&bytes);
+    let text = String::from_utf8_lossy(bytes.as_slice());
     let mut header = Header::default();
     // The last line of a truncated read is very likely a partial record; it
     // simply fails to parse and is skipped, which is the same handling any
@@ -325,9 +325,9 @@ fn top_level_count(report: &ToolReport) -> usize {
         .count()
 }
 
-fn read_sorted_dir(env: &Env, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+fn read_sorted_dir(env: &Machine<'_>, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(env
-        .read_dir_sorted(dir)?
+        .list_io(dir)?
         .into_iter()
         .map(|entry| entry.path)
         .collect())
@@ -394,7 +394,7 @@ mod tests {
             ],
         );
 
-        let report = scan(&Env::fake(home.path()), 100);
+        let report = scan(&Machine::local(home.path()), 100);
 
         assert_eq!(report.agent_sessions.len(), 1);
         let session = &report.agent_sessions[0];
@@ -415,7 +415,7 @@ mod tests {
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         write_install(home.path(), "-srv-app", "abc", &refs);
 
-        let report = scan(&Env::fake(home.path()), 100);
+        let report = scan(&Machine::local(home.path()), 100);
         assert_eq!(
             report.agent_sessions[0].cwd.as_deref(),
             Some(Path::new("/srv/app"))
@@ -439,7 +439,7 @@ mod tests {
         )
         .expect("write subagent");
 
-        let report = scan(&Env::fake(home.path()), 100);
+        let report = scan(&Machine::local(home.path()), 100);
 
         let top: Vec<_> = report
             .agent_sessions
@@ -482,7 +482,7 @@ mod tests {
             .expect("write subagent");
         }
 
-        let report = scan(&Env::fake(home.path()), 100);
+        let report = scan(&Machine::local(home.path()), 100);
 
         let ids: std::collections::HashSet<&str> = report
             .agent_sessions
@@ -519,7 +519,7 @@ mod tests {
             }
         }
 
-        let report = scan(&Env::fake(home.path()), 2);
+        let report = scan(&Machine::local(home.path()), 2);
 
         let resumable = report
             .agent_sessions
@@ -539,7 +539,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         write_install(home.path(), "-repo", "opaque", &["not json at all"]);
 
-        let report = scan(&Env::fake(home.path()), 100);
+        let report = scan(&Machine::local(home.path()), 100);
 
         assert_eq!(report.agent_sessions.len(), 1);
         assert_eq!(report.agent_sessions[0].id, "opaque");
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn a_missing_install_is_absent_not_an_error() {
         let home = tempfile::tempdir().expect("tempdir");
-        let report = scan(&Env::fake(home.path()), 100);
+        let report = scan(&Machine::local(home.path()), 100);
         assert!(report.is_empty());
         assert!(report.problems.is_empty());
     }

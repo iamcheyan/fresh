@@ -46,14 +46,14 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::env::Env;
+use crate::machine::Machine;
 use crate::model::{
     AgentId, Confidence, Evidence, Installed, MuxSession, Pane, ToolId, ToolReport, Workspace,
 };
 
 /// The config directories to check, release build first, each with the label
 /// that distinguishes its sessions from the other's.
-fn config_dirs(env: &Env) -> Vec<(PathBuf, &'static str)> {
+fn config_dirs(env: &Machine<'_>) -> Vec<(PathBuf, &'static str)> {
     let base = env
         .var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -69,7 +69,7 @@ fn config_dirs(env: &Env) -> Vec<(PathBuf, &'static str)> {
     ]
 }
 
-pub fn scan(env: &Env) -> ToolReport {
+pub fn scan(env: &Machine<'_>) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::Herdr, "Herdr");
 
     if let Some(path) = env.which("herdr") {
@@ -84,7 +84,7 @@ pub fn scan(env: &Env) -> ToolReport {
     }
 
     for (config, variant) in config_dirs(env) {
-        if !env.host().is_dir(&config) {
+        if !env.is_dir(&config) {
             continue;
         }
         report
@@ -105,10 +105,10 @@ pub fn scan(env: &Env) -> ToolReport {
         read_session_dir(env, &config, &qualify(variant, "default"), &mut report);
 
         let named = config.join("sessions");
-        if let Ok(entries) = env.read_dir_sorted(&named) {
+        if let Ok(entries) = env.list_io(&named) {
             for dir in entries
                 .into_iter()
-                .filter(|entry| entry.kind == crate::host::EntryKind::Dir)
+                .filter(|entry| entry.kind == crate::target::EntryKind::Dir)
                 .map(|entry| entry.path)
             {
                 let name = dir
@@ -135,9 +135,9 @@ fn qualify(variant: &str, name: &str) -> String {
 }
 
 /// Read one session directory: its snapshot and its sockets.
-fn read_session_dir(env: &Env, dir: &Path, name: &str, report: &mut ToolReport) {
+fn read_session_dir(env: &Machine<'_>, dir: &Path, name: &str, report: &mut ToolReport) {
     let api_socket = dir.join("herdr.sock");
-    let has_socket = env.host().exists(&api_socket);
+    let has_socket = env.exists(&api_socket);
     if has_socket {
         report.evidence.push(
             Evidence::socket(&api_socket)
@@ -146,17 +146,14 @@ fn read_session_dir(env: &Env, dir: &Path, name: &str, report: &mut ToolReport) 
     }
 
     let snapshot_path = dir.join("session.json");
-    if !env.host().is_file(&snapshot_path) {
+    if !env.is_file(&snapshot_path) {
         return;
     }
     // A session snapshot is a layout, not a transcript: bounded, but generously
     // so, since a big workspace with many panes is legitimate.
     const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
-    let text = match env
-        .host()
-        .read_file_prefix(&snapshot_path, MAX_SNAPSHOT_BYTES)
-    {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+    let text = match env.read_prefix_io(&snapshot_path, MAX_SNAPSHOT_BYTES) {
+        Ok(bytes) => String::from_utf8_lossy(bytes.as_slice()).into_owned(),
         Err(err) => {
             report.note_problem(format!("{}: {err}", snapshot_path.display()));
             return;
@@ -369,6 +366,7 @@ fn agent_from_herdr_kind(kind: &str) -> Option<AgentId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local::LocalTarget;
 
     /// A snapshot in the current shape, with the fields Herdr's own
     /// `PaneSnapshot`/`PaneAgentSessionSnapshot` structs define.
@@ -404,7 +402,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         install(home.path(), CURRENT);
 
-        let report = scan(&Env::fake(home.path()));
+        let report = scan(&Machine::local(home.path()));
 
         let panes = &report.mux_sessions[0].panes;
         assert_eq!(panes[0].agent, Some(AgentId::Claude));
@@ -424,7 +422,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         install(home.path(), &body);
 
-        let report = scan(&Env::fake(home.path()));
+        let report = scan(&Machine::local(home.path()));
 
         assert_eq!(
             report.mux_sessions[0].panes[0].agent_session_id, None,
@@ -437,7 +435,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         install(home.path(), CURRENT);
 
-        let report = scan(&Env::fake(home.path()));
+        let report = scan(&Machine::local(home.path()));
 
         let ids: Vec<&str> = report.mux_sessions[0]
             .panes
@@ -456,7 +454,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         install(home.path(), CURRENT);
 
-        let report = scan(&Env::fake(home.path()));
+        let report = scan(&Machine::local(home.path()));
 
         assert_eq!(report.mux_sessions.len(), 1);
         assert_eq!(report.mux_sessions[0].name.as_deref(), Some("default"));
@@ -470,7 +468,7 @@ mod tests {
         std::fs::create_dir_all(&named).expect("create named session");
         std::fs::write(named.join("session.json"), CURRENT).expect("write");
 
-        let report = scan(&Env::fake(home.path()));
+        let report = scan(&Machine::local(home.path()));
 
         let names: Vec<&str> = report
             .mux_sessions
@@ -494,7 +492,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         install(home.path(), legacy);
 
-        let report = scan(&Env::fake(home.path()));
+        let report = scan(&Machine::local(home.path()));
 
         assert_eq!(report.mux_sessions[0].panes.len(), 1);
         assert_eq!(report.mux_sessions[0].panes[0].agent, Some(AgentId::Claude));
@@ -511,7 +509,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         install(home.path(), future);
 
-        let report = scan(&Env::fake(home.path()));
+        let report = scan(&Machine::local(home.path()));
 
         assert_eq!(report.mux_sessions.len(), 1);
         assert!(report.problems.is_empty(), "{:?}", report.problems);
@@ -522,7 +520,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         install(home.path(), "{ this is not json");
 
-        let report = scan(&Env::fake(home.path()));
+        let report = scan(&Machine::local(home.path()));
 
         assert!(report.mux_sessions.is_empty());
         assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
@@ -538,7 +536,7 @@ mod tests {
         std::fs::create_dir_all(&dev).expect("create dev config");
         std::fs::write(dev.join("session.json"), CURRENT).expect("write");
 
-        let report = scan(&Env::fake(home.path()));
+        let report = scan(&Machine::local(home.path()));
 
         let mut ids: Vec<&str> = report
             .mux_sessions
@@ -567,7 +565,9 @@ mod tests {
         std::fs::create_dir_all(xdg.join("herdr")).expect("create");
         std::fs::write(xdg.join("herdr").join("session.json"), CURRENT).expect("write");
 
-        let env = Env::fake(root.path()).with_var("XDG_CONFIG_HOME", xdg.to_string_lossy());
+        let env = Machine::over(
+            LocalTarget::at(root.path()).with_var("XDG_CONFIG_HOME", xdg.to_string_lossy()),
+        );
         let report = scan(&env);
 
         assert_eq!(report.mux_sessions.len(), 1);

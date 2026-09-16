@@ -64,7 +64,7 @@
 
 use std::path::PathBuf;
 
-use crate::env::Env;
+use crate::machine::Machine;
 use crate::model::{
     AgentId, Confidence, Evidence, Installed, MuxSession, Pane, ToolId, ToolReport,
 };
@@ -161,7 +161,7 @@ fn decode_octal(digits: &[u8]) -> Option<u8> {
 const SESSION_FORMAT: &str = "#{session_id}\u{1f}#{session_name}\u{1f}#{session_created}\u{1f}#{session_attached}\u{1f}#{session_path}";
 const PANE_FORMAT: &str = "#{session_id}\u{1f}#{window_index}\u{1f}#{window_name}\u{1f}#{pane_id}\u{1f}#{pane_pid}\u{1f}#{pane_current_path}\u{1f}#{pane_current_command}\u{1f}#{pane_title}";
 
-pub fn scan(env: &Env) -> ToolReport {
+pub fn scan(env: &Machine<'_>) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::Tmux, "tmux");
     let sockets = socket_paths(env, &mut report);
 
@@ -192,7 +192,7 @@ pub fn scan(env: &Env) -> ToolReport {
             Err(err) => {
                 // Falling back is not a failure: without commands enabled, the
                 // socket alone is the honest answer.
-                if env.commands_enabled() {
+                if true {
                     report.note_problem(err);
                 }
                 report.mux_sessions.push(MuxSession {
@@ -221,7 +221,7 @@ pub fn scan(env: &Env) -> ToolReport {
 /// tmux puts them in `$TMUX_TMPDIR/tmux-<uid>/`, defaulting `TMUX_TMPDIR` to
 /// `/tmp`. The directory is mode 0700, so on a shared machine we see only our
 /// own — which is the correct scope for this crate anyway.
-fn socket_paths(env: &Env, report: &mut ToolReport) -> Vec<PathBuf> {
+fn socket_paths(env: &Machine<'_>, report: &mut ToolReport) -> Vec<PathBuf> {
     // Absolute only, as every other override in this crate is: a relative
     // value would resolve against the scanning process's cwd and point the
     // socket search at a directory unrelated to the user's tmux.
@@ -251,7 +251,7 @@ fn socket_paths(env: &Env, report: &mut ToolReport) -> Vec<PathBuf> {
         return Vec::new();
     };
     let dir = tmpdir.join(format!("tmux-{uid}"));
-    let Ok(entries) = env.read_dir_sorted(&dir) else {
+    let Ok(entries) = env.list_io(&dir) else {
         return Vec::new();
     };
     report.evidence.push(Evidence::dir(&dir));
@@ -270,15 +270,12 @@ fn socket_paths(env: &Env, report: &mut ToolReport) -> Vec<PathBuf> {
 /// "inside tmux's own socket directory and not a directory", which inside
 /// `tmux-<uid>/` is exactly the set of sockets — and on a host that *can* tell
 /// us, a socket reports as neither file nor directory and still passes.
-fn is_socket(env: &Env, path: &std::path::Path) -> bool {
-    match env.host().symlink_metadata(path) {
-        Ok(meta) => !meta.kind_is_dir,
-        Err(_) => false,
-    }
+fn is_socket(env: &Machine<'_>, path: &std::path::Path) -> bool {
+    env.is_socket_like(path)
 }
 
 /// Ask the server on `socket` for its sessions and panes.
-fn live_sessions(env: &Env, socket: &std::path::Path) -> Result<Vec<MuxSession>, String> {
+fn live_sessions(env: &Machine<'_>, socket: &std::path::Path) -> Result<Vec<MuxSession>, String> {
     let socket_arg = socket.to_str().ok_or("socket path is not utf-8")?;
     let listed = env.run(
         "tmux",
@@ -365,7 +362,7 @@ fn parse_panes(output: &str) -> Vec<(String, Pane)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::env::StubRunner;
+    use crate::target::MapTarget;
 
     /// Captured from tmux 3.4 with the format strings above — in the *wire*
     /// form tmux actually emits, where the `\x1f` separator comes back as the
@@ -378,28 +375,24 @@ mod tests {
 $0\0371\037agentwin\037%1\0371901\037/tmp\037bash\037vm
 ";
 
-    fn stub(socket: &str) -> StubRunner {
-        StubRunner::new()
-            .returning(
+    #[test]
+    fn parses_a_real_session_listing() {
+        let socket = "/tmp/tmux-1000/default";
+        let target = MapTarget::new("m", "/home/remote")
+            .with_file(socket, "")
+            .with_command(
                 "tmux",
                 &["-S", socket, "list-sessions", "-F", SESSION_FORMAT],
                 SESSIONS,
             )
-            .returning(
+            .with_command(
                 "tmux",
                 &["-S", socket, "list-panes", "-a", "-F", PANE_FORMAT],
                 PANES,
-            )
-    }
+            );
+        let env = Machine::over(target);
 
-    #[test]
-    fn parses_a_real_session_listing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let socket = dir.path().join("default");
-        let socket_arg = socket.to_str().expect("utf-8");
-        let env = Env::fake(dir.path()).with_commands(stub(socket_arg));
-
-        let sessions = live_sessions(&env, &socket).expect("listing");
+        let sessions = live_sessions(&env, std::path::Path::new(socket)).expect("listing");
 
         assert_eq!(sessions.len(), 1);
         let session = &sessions[0];
@@ -466,7 +459,7 @@ $0\0371\037agentwin\037%1\0371901\037/tmp\037bash\037vm
     #[test]
     fn commands_are_not_run_unless_enabled() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let env = Env::fake(dir.path());
+        let env = Machine::local(dir.path());
         let err = live_sessions(&env, &dir.path().join("default")).expect_err("must refuse");
         assert!(err.contains("disabled"), "unexpected error: {err}");
     }
