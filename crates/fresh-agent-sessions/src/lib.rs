@@ -164,7 +164,11 @@ pub struct ScanResult {
     pub sessions: Vec<CollectedSession>,
     /// Non-fatal problems: an unreadable directory, a state file that did not
     /// parse, a truncated listing. A scan never fails as a whole.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// Always serialised, even when empty. A consumer reads
+    /// `result.problems.length`, and a field that silently disappears when it
+    /// has nothing in it is a field that throws on the happy path.
+    #[serde(default)]
     pub problems: Vec<String>,
     /// The grouped, per-tool view, for callers that want the raw report rather
     /// than the flat rows: which tools are installed, where their state is,

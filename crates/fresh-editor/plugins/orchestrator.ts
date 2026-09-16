@@ -5544,7 +5544,7 @@ function runDockMenuOption(optKey: string): void {
   }
   if (optKey === "main:discover") {
     closeDockMenu();
-    void discoverAgentSessions();
+    discoverAgentSessions();
     return;
   }
   // The settings flip in place and the menu stays up, so a second choice
@@ -9081,55 +9081,224 @@ function machineForHost(h: SshConfigHost): Machine {
   };
 }
 
-// Report the agent sessions other tools are running on this session's
-// machine — tmux panes, Claude Code and Codex transcripts, Orca and Herdr
-// workspaces. Read-only: this lists what is already there and changes
-// nothing, which is why it needs no confirmation.
+// ── Discover agent sessions ──────────────────────────────────────────────
 //
-// The scan runs off the editor thread, so this awaits rather than blocking
-// the dock; a slow remote home directory shows the pending notice and then
-// the result.
-async function discoverAgentSessions(): Promise<void> {
-  editor.setStatus(editor.t("dock.discover_running"));
-  try {
-    // Both arguments are required: the plugin runtime binds by arity.
-    // "" takes the authority's own label for the machine; `true` lets the
-    // scan also ask tmux and friends for their live session lists, which is
-    // what makes a running pane show up before its agent writes a transcript.
-    const scan = await editor.discoverAgentSessions("", true);
-    if (scan.status.state !== "reachable") {
-      editor.setStatus(
-        editor.t("dock.discover_unreachable", { machine: scan.machine }),
-      );
-      return;
+// Lists the agent sessions other tools are running — tmux panes, Claude Code
+// and Codex transcripts, Orca and Herdr workspaces. Read-only: it reports
+// what is already there and changes nothing, which is why it needs no
+// confirmation.
+
+const DISCOVER_MODE = "orchestrator-discover";
+let discoverPanel: FloatingWidgetPanel | null = null;
+
+interface DiscoverRow {
+  key: string;
+  /** A source heading (`tmux`, `Claude Code`) rather than a session. */
+  group: boolean;
+  label: string;
+  detail: string;
+}
+
+interface DiscoverState {
+  /** Index into `discoverMachines()`. */
+  machineIndex: number;
+  scanning: boolean;
+  /** Null until the first scan; the rows a scan produced otherwise. */
+  rows: DiscoverRow[] | null;
+  /** Empty unless the last scan failed or reported problems. */
+  note: string;
+  index: number;
+}
+
+let discoverState: DiscoverState | null = null;
+
+/** Local first, then every configured machine. */
+function discoverMachines(): (Machine | null)[] {
+  return [null, ...loadMachines()];
+}
+
+function discoverMachineLabel(m: Machine | null): string {
+  return m ? m.name : editor.t("machine.local");
+}
+
+/** Group the flat session list by the tool that owns each row. */
+function discoverRowsFrom(scan: AgentSessionScan): DiscoverRow[] {
+  const groups = new Map<string, AgentSession[]>();
+  for (const session of scan.sessions) {
+    const owner = session.owner.display_name;
+    const bucket = groups.get(owner);
+    if (bucket) bucket.push(session);
+    else groups.set(owner, [session]);
+  }
+
+  const rows: DiscoverRow[] = [];
+  // Busiest source first, then alphabetically, so the order is stable
+  // between scans of an unchanged machine.
+  const ordered = [...groups.entries()].sort(
+    (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]),
+  );
+  for (const [owner, sessions] of ordered) {
+    rows.push({
+      key: `group:${owner}`,
+      group: true,
+      label: owner,
+      detail: editor.t("discover.group_count", { count: String(sessions.length) }),
+    });
+    for (const session of sessions) {
+      const agent = session.agent ? String(session.agent) : "—";
+      const where = session.paths.cwd ?? "";
+      rows.push({
+        key: `session:${session.key.machine}/${session.key.tool}/${session.key.id}`,
+        group: false,
+        label: `${agent}  ${session.title ?? editor.pathBasename(where) ?? session.key.id}`,
+        detail: where,
+      });
     }
-    const agents = scan.sessions.filter((s) => s.agent !== undefined && s.agent !== null);
-    if (agents.length === 0) {
-      editor.setStatus(editor.t("dock.discover_none", { machine: scan.machine }));
-      return;
-    }
-    // Summarised by agent rather than listed: the dock's own rows are the
-    // place to browse sessions, and a status line that names twelve of them
-    // is unreadable.
-    const byAgent = new Map<string, number>();
-    for (const session of agents) {
-      const agent = String(session.agent);
-      byAgent.set(agent, (byAgent.get(agent) ?? 0) + 1);
-    }
-    const summary = [...byAgent.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .map(([agent, count]) => `${count} ${agent}`)
-      .join(", ");
-    editor.setStatus(
-      editor.t("dock.discover_found", {
-        count: String(agents.length),
-        machine: scan.machine,
-        summary,
+  }
+  return rows;
+}
+
+function discoverRowEntry(r: DiscoverRow): TextPropertyEntry {
+  const dim = { fg: "ui.menu_disabled_fg" };
+  if (r.group) {
+    return styledRow([
+      { text: r.label, style: { bold: true } },
+      { text: `  ${r.detail}`, style: dim },
+    ]);
+  }
+  return styledRow([
+    { text: `  ${r.label}` },
+    { text: r.detail ? `  ${r.detail}` : "", style: dim },
+  ]);
+}
+
+function buildDiscoverSpec(): WidgetSpec {
+  const st = discoverState!;
+  const machines = discoverMachines();
+  const rows = st.rows ?? [];
+
+  const body: WidgetSpec[] = [
+    dropdown(machines.map(discoverMachineLabel), {
+      selectedIndex: Math.min(st.machineIndex, machines.length - 1),
+      label: editor.t("discover.machine"),
+      labelWidth: FORM_LABEL_W,
+      key: "discover-machine",
+    }),
+    spacer(0),
+  ];
+
+  if (st.note) body.push(fieldNote(st.note), spacer(0));
+
+  if (st.scanning) {
+    body.push(label(editor.t("dock.discover_running")));
+  } else if (st.rows === null) {
+    body.push(label(editor.t("discover.hint"), { style: { fg: "ui.menu_disabled_fg" } }));
+  } else if (rows.length === 0) {
+    body.push(label(editor.t("discover.empty")));
+  } else {
+    body.push(
+      list({
+        items: rows.map(discoverRowEntry),
+        itemKeys: rows.map((r) => r.key),
+        selectedIndex: Math.min(st.index, rows.length - 1),
+        visibleRows: Math.min(14, rows.length),
+        key: "discover-rows",
       }),
     );
-  } catch (err) {
-    editor.setStatus(editor.t("dock.discover_failed", { error: String(err) }));
   }
+
+  body.push(
+    spacer(0),
+    wrappingRow(
+      withAccel(
+        button(editor.t("discover.btn_scan"), {
+          intent: "primary",
+          key: "discover-scan",
+          disabled: st.scanning,
+        }),
+        "⏎",
+      ),
+      spacer(2),
+      withAccel(button(editor.t("machine.btn_close"), { key: "discover-close" }), "Esc"),
+    ),
+  );
+  return col(...body);
+}
+
+function refreshDiscoverDialog(): void {
+  if (discoverPanel && discoverState) discoverPanel.update(buildDiscoverSpec());
+}
+
+function openDiscoverDialog(): void {
+  yieldDockToDialog();
+  discoverState = { machineIndex: 0, scanning: false, rows: null, note: "", index: 0 };
+  discoverPanel = new FloatingWidgetPanel();
+  discoverPanel.mount(buildDiscoverSpec(), {
+    widthPct: 70,
+    heightPct: 70,
+    focusMarker: true,
+    title: editor.t("discover.title"),
+    closable: true,
+  });
+  editor.setEditorMode(DISCOVER_MODE);
+  discoverPanel.setFocusKey("discover-scan");
+}
+
+function closeDiscoverDialog(): void {
+  if (discoverPanel) {
+    discoverPanel.unmount();
+    discoverPanel = null;
+  }
+  discoverState = null;
+  editor.setEditorMode(null);
+  restoreDockAfterDialog();
+}
+
+// Run the scan for the selected machine.
+//
+// The scan runs off the editor thread, so this awaits rather than blocking
+// the dialog: a slow remote home directory shows the pending line and then
+// the tree.
+async function runDiscoverScan(): Promise<void> {
+  const st = discoverState;
+  if (!st || st.scanning) return;
+  const machine = discoverMachines()[st.machineIndex] ?? null;
+
+  // Only the machine this session is already attached to can be scanned:
+  // reading another one means connecting to it first, which is the machines
+  // dialog's job. Saying so beats scanning the wrong host and labelling the
+  // result with the right one's name.
+  if (machine !== null) {
+    st.note = editor.t("discover.not_attached", { machine: machine.name });
+    st.rows = [];
+    refreshDiscoverDialog();
+    return;
+  }
+
+  st.scanning = true;
+  st.note = "";
+  refreshDiscoverDialog();
+  try {
+    const scan = await editor.discoverAgentSessions("", true);
+    st.scanning = false;
+    if (scan.status.state !== "reachable") {
+      st.rows = [];
+      st.note = editor.t("dock.discover_unreachable", { machine: scan.machine });
+    } else {
+      st.rows = discoverRowsFrom(scan);
+      st.index = 0;
+      st.note = scan.problems.length > 0 ? scan.problems[0] : "";
+    }
+  } catch (err) {
+    st.scanning = false;
+    st.rows = [];
+    st.note = editor.t("dock.discover_failed", { error: String(err) });
+  }
+  refreshDiscoverDialog();
+}
+
+function discoverAgentSessions(): void {
+  openDiscoverDialog();
 }
 
 function openMachinesDialog(): void {
@@ -9280,11 +9449,57 @@ const MACHINES_MODE_BINDINGS: [string, string][] = [
 ];
 editor.defineMode(MACHINES_MODE, MACHINES_MODE_BINDINGS, true, true);
 
+const DISCOVER_MODE_BINDINGS: [string, string][] = [
+  ["Enter", "orchestrator_discover_enter"],
+];
+editor.defineMode(DISCOVER_MODE, DISCOVER_MODE_BINDINGS, true, true);
+
+registerHandler("orchestrator_discover_enter", () => {
+  if (!discoverPanel || !discoverState) return;
+  // Enter always scans: it is the one thing this dialog does, and making it
+  // depend on which widget happens to hold focus means Enter on the machine
+  // dropdown opens a list instead of doing the obvious thing. Esc and the
+  // Close button still close.
+  void runDiscoverScan();
+});
+
 registerHandler("orchestrator_machines_enter", () => {
   if (!machinesPanel || !machinesState) return;
   if (machinesState.focus === "machines" || machinesState.focus === "") return newWorkspaceOnSelected();
   machinesPanel.command(activate());
 });
+
+function handleDiscoverEvent(e: WidgetEvt): void {
+  const st = discoverState!;
+  if (e.event_type === "cancel") {
+    discoverPanel = null;
+    closeDiscoverDialog();
+    return;
+  }
+  if (e.event_type === "select" && e.widget_key === "discover-machine") {
+    st.machineIndex = e.index ?? 0;
+    // A different machine invalidates the rows on screen: showing one
+    // machine's sessions under another's name is worse than showing none.
+    st.rows = null;
+    st.note = "";
+    refreshDiscoverDialog();
+    return;
+  }
+  if (e.event_type === "select" && e.widget_key === "discover-rows") {
+    st.index = e.index ?? 0;
+    return;
+  }
+  if (e.event_type === "activate") {
+    if (e.widget_key === "discover-scan") {
+      void runDiscoverScan();
+      return;
+    }
+    if (e.widget_key === "discover-close") {
+      closeDiscoverDialog();
+      return;
+    }
+  }
+}
 
 function handleMachinesEvent(e: WidgetEvt): void {
   const st = machinesState!;
@@ -14052,6 +14267,10 @@ editor.on("widget_event", (e) => {
     handleMachinesEvent(e);
     return;
   }
+  if (discoverPanel && discoverState && e.panel_id === discoverPanel.id()) {
+    handleDiscoverEvent(e);
+    return;
+  }
   if (explainPanel && e.panel_id === explainPanel.id()) {
     handleExplainEvent(e);
     return;
@@ -15404,7 +15623,7 @@ editor.registerCommand("%cmd.reload_rules", "%cmd.reload_rules_desc", "orchestra
   terminalBypass: true,
 });
 
-registerHandler("orchestrator_discover_sessions", () => void discoverAgentSessions());
+registerHandler("orchestrator_discover_sessions", discoverAgentSessions);
 editor.registerCommand(
   "%cmd.discover_sessions",
   "%cmd.discover_sessions_desc",
