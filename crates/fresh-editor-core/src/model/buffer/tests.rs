@@ -2596,9 +2596,7 @@ mod rebuild_pristine_saved_root_tests {
                 root: &Path,
                 opts: &crate::model::filesystem::WalkOptions<'_>,
                 cancel: &std::sync::atomic::AtomicBool,
-                on_entry: &mut dyn FnMut(
-                    crate::model::filesystem::WalkEntry<'_>,
-                ) -> bool,
+                on_entry: &mut dyn FnMut(crate::model::filesystem::WalkEntry<'_>) -> bool,
             ) -> std::io::Result<()> {
                 self.inner.walk(root, opts, cancel, on_entry)
             }
