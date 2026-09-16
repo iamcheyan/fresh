@@ -5660,6 +5660,22 @@ pub enum PluginCommand {
         callback_id: JsCallbackId,
     },
 
+    /// Read environment variables from the machine.
+    ///
+    /// Resolves with a name→value map holding only the names that are set.
+    ///
+    /// Answers only for a *local* authority, where the editor's own
+    /// environment is that machine's. A remote machine's environment is not
+    /// readable without running a command there, so every name comes back
+    /// missing rather than filled in from this computer — a scanner told that
+    /// `CODEX_HOME` points somewhere would go and read the wrong machine's
+    /// disk and label the result with the right one's name.
+    MachineEnv {
+        machine: Option<u64>,
+        names: Vec<String>,
+        callback_id: JsCallbackId,
+    },
+
     /// Walk a subtree on the machine the editor is acting on, in one call.
     ///
     /// Runs off the editor thread. Bulk by design: a remote authority walks

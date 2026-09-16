@@ -1915,6 +1915,14 @@ impl Editor {
                 self.handle_close_machine(machine, callback_id);
             }
 
+            PluginCommand::MachineEnv {
+                machine,
+                names,
+                callback_id,
+            } => {
+                self.handle_machine_env(machine, names, callback_id);
+            }
+
             PluginCommand::WalkTree {
                 machine,
                 root,

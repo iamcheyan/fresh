@@ -5514,6 +5514,13 @@ interface FreshMachine {
 		maxBytes: number;
 	}[]): Promise<FilePrefix[]>;
 	run(program: string, args?: string[], cwd?: string): Promise<CommandResult>;
+	/** Environment variables, for the names that are set.
+	*
+	*  Answers only for a local machine, where the editor's own environment is
+	*  that machine's. A remote one reports nothing rather than this computer's
+	*  values, so a scanner falls back to default locations instead of reading
+	*  the wrong disk. */
+	env(names: string[]): Promise<Record<string, string>>;
 	/** Idempotent: closing twice is not an error. */
 	close(): Promise<boolean>;
 }
@@ -5577,6 +5584,8 @@ interface EditorAPI {
 	/** Run a command on the active window's authority — over a remote
 	*  one it runs there, unlike `spawnHostProcess`. */
 	runOnTarget(program: string, args?: string[], cwd?: string): Promise<CommandResult>;
+	/** Environment variables from the active window's authority; local only. */
+	machineEnv(names: string[]): Promise<Record<string, string>>;
 }
 /**
 * Typed overload of `editor.getPluginApi`. When the caller passes a

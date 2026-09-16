@@ -3527,6 +3527,46 @@ impl Editor {
         }
     }
 
+    /// Read environment variables from a machine.
+    ///
+    /// Local only, deliberately: see `PluginCommand::MachineEnv`. Cheap enough
+    /// to answer on the editor thread — it is a map lookup, not IO.
+    pub(super) fn handle_machine_env(
+        &mut self,
+        machine: Option<u64>,
+        names: Vec<String>,
+        callback_id: fresh_core::api::JsCallbackId,
+    ) {
+        use crate::services::authority::SessionAuthoritySpec;
+
+        let authority = match machine {
+            None => self.authority(),
+            Some(id) => match self.open_machines.get(&id) {
+                Some(auth) => auth.as_ref(),
+                None => {
+                    self.plugin_manager
+                        .read()
+                        .unwrap()
+                        .reject_callback(callback_id, format!("machine {id} is not open"));
+                    return;
+                }
+            },
+        };
+
+        let mut found = serde_json::Map::new();
+        if matches!(authority.session_spec(), SessionAuthoritySpec::Local) {
+            for name in names {
+                if let Ok(value) = std::env::var(&name) {
+                    found.insert(name, serde_json::Value::String(value));
+                }
+            }
+        }
+        self.plugin_manager
+            .read()
+            .unwrap()
+            .resolve_callback(callback_id, serde_json::Value::Object(found).to_string());
+    }
+
     /// Hand a subtree walk to the off-loop worker.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn handle_walk_tree(

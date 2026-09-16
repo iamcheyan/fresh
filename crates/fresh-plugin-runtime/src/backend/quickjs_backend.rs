@@ -1864,6 +1864,41 @@ impl JsEditorApi {
         id
     }
 
+    /// Read environment variables from a machine.
+    ///
+    /// Resolves with a map holding only the names that are set. A remote
+    /// machine reports nothing rather than this computer's values.
+    #[plugin_api(
+        async_promise,
+        js_name = "_machineEnvOn",
+        ts_return = "Record<string, string>"
+    )]
+    #[qjs(rename = "_machineEnvStart")]
+    pub fn machine_env_start<'js>(
+        &self,
+        ctx: rquickjs::Ctx<'js>,
+        machine: i64,
+        #[plugin_api(ts_type = "string[]")] names: rquickjs::Value<'js>,
+    ) -> rquickjs::Result<u64> {
+        let parsed: serde_json::Value = rquickjs_serde::from_value(names)
+            .map_err(|e| rquickjs::Error::new_from_js_message("serialize", "", &e.to_string()))?;
+        let serde_json::Value::Array(items) = parsed else {
+            return Err(throw_js(&ctx, "machineEnv: `names` must be an array"));
+        };
+        let names = items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+
+        let id = self.alloc_request_id();
+        let _ = self.command_sender.send(PluginCommand::MachineEnv {
+            machine: (machine > 0).then_some(machine as u64),
+            names,
+            callback_id: JsCallbackId::new(id),
+        });
+        Ok(id)
+    }
+
     /// Walk a directory tree on the machine the editor is acting on.
     ///
     /// Resolves with `{entries, truncated}`, each entry
@@ -9019,6 +9054,7 @@ const EDITOR_PROMISE_BOOTSTRAP: &str = r#"
                 editor._walkTreeOn = _wrapAsync("_walkTreeStart", "walkTree");
                 editor._readFilePrefixesOn = _wrapAsync("_readFilePrefixesStart", "readFilePrefixes");
                 editor._runOnTargetOn = _wrapAsync("_runOnTargetStart", "runOnTarget");
+                editor._machineEnvOn = _wrapAsync("_machineEnvStart", "machineEnv");
                 editor._openMachineRaw = _wrapAsync("_openMachineStart", "openMachine");
                 editor._closeMachineRaw = _wrapAsync("_closeMachineStart", "closeMachine");
 
@@ -9034,6 +9070,9 @@ const EDITOR_PROMISE_BOOTSTRAP: &str = r#"
                 };
                 editor.runOnTarget = function(program, args, cwd) {
                     return editor._runOnTargetOn(0, program, args || [], cwd || "");
+                };
+                editor.machineEnv = function(names) {
+                    return editor._machineEnvOn(0, names || []);
                 };
                 editor.openMachine = function(spec) {
                     return editor._openMachineRaw(spec).then(function(info) {
@@ -9051,6 +9090,9 @@ const EDITOR_PROMISE_BOOTSTRAP: &str = r#"
                             },
                             run: function(program, args, cwd) {
                                 return editor._runOnTargetOn(id, program, args || [], cwd || "");
+                            },
+                            env: function(names) {
+                                return editor._machineEnvOn(id, names || []);
                             },
                             close: function() {
                                 return editor._closeMachineRaw(id);
