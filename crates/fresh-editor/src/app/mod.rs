@@ -470,6 +470,21 @@ pub struct PerfCounters {
 }
 
 /// The main editor struct - manages multiple buffers, clipboard, and rendering
+/// A machine a plugin opened with `openMachine`.
+///
+/// Two kinds, because an `AuthorityPayload` can only describe a local
+/// filesystem: an SSH or Kubernetes authority is handed its already-built
+/// connection and keepalive by whoever opened it, so the only way to reach a
+/// genuinely remote machine is to borrow the authority of a window already
+/// attached to it.
+pub(crate) enum OpenMachine {
+    /// Built here from a plugin payload, and dropped when the handle closes.
+    Owned(Arc<crate::services::authority::Authority>),
+    /// A window's own authority, borrowed. Resolved on each use rather than
+    /// cloned, so a handle never outlives the window it names.
+    Window(fresh_core::WindowId),
+}
+
 pub struct Editor {
     /// Machines a plugin opened with `openMachine`, by handle id.
     ///
@@ -477,8 +492,7 @@ pub struct Editor {
     /// with no window, so a plugin can read a machine nobody is looking at.
     /// Held until the plugin closes the handle, so a scan that walks and then
     /// reads connects once rather than per call.
-    pub(crate) open_machines:
-        std::collections::HashMap<u64, Arc<crate::services::authority::Authority>>,
+    pub(crate) open_machines: std::collections::HashMap<u64, OpenMachine>,
     /// Source of `open_machines` keys. Starts at 1, so 0 is free to mean
     /// "no machine — use the active window's authority" on the wire.
     pub(crate) next_machine_id: u64,

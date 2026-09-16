@@ -3417,6 +3417,29 @@ impl Editor {
         Some((runtime, sender))
     }
 
+    /// The `{id, platform, home, label}` a plugin gets back for a machine.
+    fn machine_info(
+        authority: &crate::services::authority::Authority,
+        id: u64,
+    ) -> serde_json::Value {
+        let platform = match crate::services::agent_sessions::platform_of(authority) {
+            fresh_agent_sessions::Platform::MacOs => "macos",
+            fresh_agent_sessions::Platform::Windows => "windows",
+            fresh_agent_sessions::Platform::Linux => "linux",
+            fresh_agent_sessions::Platform::Other => "other",
+        };
+        serde_json::json!({
+            "id": id,
+            "platform": platform,
+            "home": authority
+                .filesystem
+                .home_dir()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            "label": authority.display_label,
+        })
+    }
+
     /// Open a machine without attaching it to a window.
     ///
     /// The payload is the one `setAuthority` takes, built through the same
@@ -3428,6 +3451,44 @@ impl Editor {
         payload: serde_json::Value,
         callback_id: fresh_core::api::JsCallbackId,
     ) {
+        // A window's own authority, rather than a new one built from a spec.
+        //
+        // This is the only way to reach a machine the editor is genuinely
+        // connected to: an `AuthorityPayload` can only describe a local
+        // filesystem (`FilesystemSpec::Local`), because an SSH or Kubernetes
+        // authority is handed its already-established connection and keepalive
+        // by whoever opened it. So a plugin that wants to read the machine a
+        // window is attached to asks for that window, and one that wants a
+        // local or container backend passes a payload.
+        if payload.get("kind").and_then(serde_json::Value::as_str) == Some("window") {
+            let window = payload
+                .get("window")
+                .and_then(serde_json::Value::as_u64)
+                .map(fresh_core::WindowId)
+                .unwrap_or(self.active_window);
+            let window_id = window;
+            let Some(window) = self.windows.get(&window_id) else {
+                self.plugin_manager
+                    .read()
+                    .unwrap()
+                    .reject_callback(callback_id, format!("openMachine: no window {window_id:?}"));
+                return;
+            };
+            // Borrowed, not rebuilt: the window owns its authority outright, so
+            // this hands back a handle onto the live one rather than a second
+            // connection to the same host.
+            let id = self.next_machine_id;
+            self.next_machine_id += 1;
+            let info = Self::machine_info(&window.authority, id);
+            self.open_machines
+                .insert(id, super::OpenMachine::Window(window_id));
+            self.plugin_manager
+                .read()
+                .unwrap()
+                .resolve_callback(callback_id, info.to_string());
+            return;
+        }
+
         let parsed =
             match serde_json::from_value::<crate::services::authority::AuthorityPayload>(payload) {
                 Ok(parsed) => parsed,
@@ -3455,34 +3516,15 @@ impl Editor {
                 }
             };
 
-        let platform = match crate::services::agent_sessions::platform_of(&authority) {
-            fresh_agent_sessions::Platform::MacOs => "macos",
-            fresh_agent_sessions::Platform::Windows => "windows",
-            fresh_agent_sessions::Platform::Linux => "linux",
-            fresh_agent_sessions::Platform::Other => "other",
-        };
-        let home = authority
-            .filesystem
-            .home_dir()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let label = authority.display_label.clone();
-
         let id = self.next_machine_id;
         self.next_machine_id += 1;
-        self.open_machines.insert(id, Arc::new(authority));
-
-        let payload = serde_json::json!({
-            "id": id,
-            "platform": platform,
-            "home": home,
-            "label": label,
-        });
+        let info = Self::machine_info(&authority, id);
+        self.open_machines
+            .insert(id, super::OpenMachine::Owned(Arc::new(authority)));
         self.plugin_manager
             .read()
             .unwrap()
-            .resolve_callback(callback_id, payload.to_string());
+            .resolve_callback(callback_id, info.to_string());
     }
 
     /// Drop a machine opened by `openMachine`.
@@ -3502,28 +3544,45 @@ impl Editor {
     }
 
     /// The filesystem for `machine`, or the active window's when `None`.
-    ///
-    /// Returns `None` once the callback has been rejected for an unknown
-    /// handle — a closed or never-opened machine is an error the plugin sees,
-    /// not a silent fall back to this machine, which would read the wrong
-    /// computer and label the answer with the right one's name.
     fn filesystem_for(
         &self,
         machine: Option<u64>,
         callback_id: fresh_core::api::JsCallbackId,
     ) -> Option<Arc<dyn crate::model::filesystem::FileSystem + Send + Sync>> {
-        match machine {
-            None => Some(self.authority().filesystem.clone()),
-            Some(id) => match self.open_machines.get(&id) {
-                Some(auth) => Some(auth.filesystem.clone()),
-                None => {
-                    self.plugin_manager
-                        .read()
-                        .unwrap()
-                        .reject_callback(callback_id, format!("machine {id} is not open"));
-                    None
-                }
+        self.authority_for(machine, callback_id)
+            .map(|authority| authority.filesystem.clone())
+    }
+
+    /// The authority `machine` names, or the active window's when `None`.
+    ///
+    /// Returns `None` once the callback has been rejected — a closed handle,
+    /// or a window that has since been shut, is an error the plugin sees
+    /// rather than a silent fall back to this machine, which would read the
+    /// wrong computer and label the answer with the right one's name.
+    fn authority_for(
+        &self,
+        machine: Option<u64>,
+        callback_id: fresh_core::api::JsCallbackId,
+    ) -> Option<&crate::services::authority::Authority> {
+        let Some(id) = machine else {
+            return Some(self.authority());
+        };
+        let reject = |msg: String| {
+            self.plugin_manager
+                .read()
+                .unwrap()
+                .reject_callback(callback_id, msg);
+            None
+        };
+        match self.open_machines.get(&id) {
+            Some(super::OpenMachine::Owned(authority)) => Some(authority.as_ref()),
+            Some(super::OpenMachine::Window(window)) => match self.windows.get(window) {
+                Some(window) => Some(&window.authority),
+                // The window closed while the handle was open. Saying so beats
+                // quietly reading this machine instead of the one that is gone.
+                None => reject(format!("machine {id}'s window has closed")),
             },
+            None => reject(format!("machine {id} is not open")),
         }
     }
 
@@ -3539,18 +3598,8 @@ impl Editor {
     ) {
         use crate::services::authority::SessionAuthoritySpec;
 
-        let authority = match machine {
-            None => self.authority(),
-            Some(id) => match self.open_machines.get(&id) {
-                Some(auth) => auth.as_ref(),
-                None => {
-                    self.plugin_manager
-                        .read()
-                        .unwrap()
-                        .reject_callback(callback_id, format!("machine {id} is not open"));
-                    return;
-                }
-            },
+        let Some(authority) = self.authority_for(machine, callback_id) else {
+            return;
         };
 
         let mut found = serde_json::Map::new();
@@ -3649,18 +3698,8 @@ impl Editor {
         let Some((runtime, sender)) = self.off_loop_parts(callback_id) else {
             return;
         };
-        let authority = match machine {
-            None => self.authority(),
-            Some(id) => match self.open_machines.get(&id) {
-                Some(auth) => auth.as_ref(),
-                None => {
-                    self.plugin_manager
-                        .read()
-                        .unwrap()
-                        .reject_callback(callback_id, format!("machine {id} is not open"));
-                    return;
-                }
-            },
+        let Some(authority) = self.authority_for(machine, callback_id) else {
+            return;
         };
         super::plugin_offloop::run_on_target(
             &runtime,

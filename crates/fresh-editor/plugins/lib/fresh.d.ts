@@ -5571,9 +5571,17 @@ interface CommandResult {
 * window's own authority.
 */
 interface EditorAPI {
-	/** Open a machine without attaching it to a window. `spec` is the
-	*  same payload `setAuthority` takes. */
-	openMachine(spec: unknown): Promise<FreshMachine>;
+	/** Open a machine to read without attaching it to a window.
+	*
+	*  Two shapes. `{ kind: "window", window?: number }` borrows a window's own
+	*  authority — the only way to reach a genuinely remote machine, because an
+	*  SSH or Kubernetes authority is handed its already-established connection
+	*  by whoever opened it. Anything else is an `AuthorityPayload`, the same
+	*  one `setAuthority` takes, which builds a local or container backend. */
+	openMachine(spec: {
+		kind: "window";
+		window?: number;
+	} | AuthorityPayload): Promise<FreshMachine>;
 	/** Walk a subtree on the active window's authority. */
 	walkTree(root: string, options?: WalkTreeOptions): Promise<WalkTreeResult>;
 	/** Read many file headers on the active window's authority. */
