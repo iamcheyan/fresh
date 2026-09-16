@@ -72,8 +72,11 @@ use crate::model::{
 /// Field separator for our `-F` format strings. See the module docs — tmux
 /// emits this byte back as the four characters `\037`, so nothing splits on it
 /// directly; [`split_escaped_fields`] is what understands the wire form.
-#[allow(dead_code, reason = "documents the byte the format strings below request; \
-                                     the wire form is what SEP_BYTE decodes")]
+#[allow(
+    dead_code,
+    reason = "documents the byte the format strings below request; \
+                                     the wire form is what SEP_BYTE decodes"
+)]
 const SEP: char = '\u{1f}';
 
 /// The byte value of [`SEP`], as tmux's octal escape encodes it.

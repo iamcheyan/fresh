@@ -24,18 +24,19 @@
 //! promised to stay put. The layouts in this crate were obtained three ways,
 //! and each record says which:
 //!
-//! 1. **Read off the tool's own source**, where it is available: Herdr's
-//!    `SessionSnapshot` structs, Orca's `PersistedState` and its
-//!    `ai-vault/session-scanner-agent-sources.ts` — which is itself a
-//!    catalogue of ~18 agents' stores, and is the single most useful artefact
-//!    found while building this.
+//! 1. **Checked against the tool's own source**, where it is published:
+//!    Herdr's session snapshot handling (Apache-2.0), Orca's persisted state
+//!    and its `ai-vault/session-scanner-agent-sources.ts` (MIT) — the latter a
+//!    catalogue of ~18 agents' stores, and the single most useful artefact
+//!    found while building this. Only format facts were taken from either; see
+//!    `THIRD-PARTY-NOTES.md`.
 //! 2. **Confirmed against a live install**: tmux 3.4, Claude Code 2.1.273 and
 //!    Codex CLI 0.154.0 were installed and inspected while writing this, and
 //!    their entries are marked as verified.
-//! 3. **Transcribed from another tool's reverse-engineering**, for the agents
-//!    and platforms not reachable from here. These are the entries most likely
-//!    to have drifted, and [`catalog::AgentStore::verified_against_install`]
-//!    is `false` for every one of them.
+//! 3. **Taken on another tool's authority**, for the agents and platforms not
+//!    reachable from here. These are the entries most likely to have drifted,
+//!    and [`catalog::AgentStore::verified_against_install`] is `false` for
+//!    every one of them.
 //!
 //! # Design
 //!

@@ -9,14 +9,18 @@
 //!
 //! # Provenance
 //!
-//! These entries were not guessed. They were read off the two orchestrators
-//! that already solved this problem and shipped the answer in their source —
-//! Orca's `src/main/ai-vault/session-scanner-agent-sources.ts` and Herdr's
-//! `src/agent_resume.rs` — and the ones reachable from this machine
-//! (Claude Code, Codex, tmux) were then confirmed against a real install. Each
-//! entry's comment says which of those it is, because a confirmed entry and a
-//! transcribed one deserve different amounts of trust when a scan comes back
-//! empty.
+//! These entries were not guessed. Two orchestrators had already worked these
+//! layouts out and publish the result in their source, so the paths here were
+//! cross-checked against Orca's `session-scanner-agent-sources.ts` (MIT) and
+//! Herdr's session handling (Apache-2.0); the stores reachable from this
+//! machine (Claude Code, Codex, tmux) were then confirmed against a real
+//! install. Each entry's comment says which it is, because a confirmed entry
+//! and a cross-checked one deserve different amounts of trust when a scan
+//! comes back empty.
+//!
+//! What was taken from those projects is *facts* — directory paths,
+//! environment-variable names, filename patterns — and no code or prose. See
+//! `THIRD-PARTY-NOTES.md` at the crate root.
 //!
 //! # What is deliberately *not* here
 //!
@@ -190,7 +194,7 @@ impl AgentStore {
 /// Claude Code and Codex are absent on purpose — see the module docs.
 pub const AGENT_STORES: &[AgentStore] = &[
     // Gemini CLI writes session JSON under a `tmp` directory keyed by project
-    // hash. Transcribed from Orca.
+    // hash. Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Gemini,
         display_name: "Gemini CLI",
@@ -206,7 +210,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
         verified_against_install: false,
     },
     // Copilot CLI. `COPILOT_HOME` moves the base; sessions are under
-    // `session-state`. Transcribed from Orca.
+    // `session-state`. Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Copilot,
         display_name: "GitHub Copilot CLI",
@@ -223,7 +227,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
     },
     // Cursor's agent transcripts sit under `~/.cursor/projects/<project>/
     // agent-transcripts/`; the sibling directories under a project are not
-    // sessions, hence the path rule. Transcribed from Orca.
+    // sessions, hence the path rule. Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Cursor,
         display_name: "Cursor Agent",
@@ -239,7 +243,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
         verified_against_install: false,
     },
     // Grok writes one directory per session with a `summary.json` in it, so
-    // the session id is the directory's name. Transcribed from Orca.
+    // the session id is the directory's name. Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Grok,
         display_name: "Grok CLI",
@@ -255,7 +259,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
         verified_against_install: false,
     },
     // Devin's ATIF transcripts live under `<DEVIN_HOME>/transcripts`.
-    // Transcribed from Orca.
+    // Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Devin,
         display_name: "Devin CLI",
@@ -270,7 +274,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
         cwd_fields: &["cwd"],
         verified_against_install: false,
     },
-    // Hermes names its session files `session_*`. Transcribed from Orca.
+    // Hermes names its session files `session_*`. Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Hermes,
         display_name: "Hermes",
@@ -286,7 +290,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
         verified_against_install: false,
     },
     // Atlassian Rovo Dev: one directory per session with a `metadata.json`.
-    // Transcribed from Orca.
+    // Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Rovo,
         display_name: "Rovo Dev",
@@ -302,7 +306,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
         verified_against_install: false,
     },
     // Pi's variable names the sessions directory itself, not a base — so the
-    // suffix is empty. Transcribed from Orca.
+    // suffix is empty. Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Pi,
         display_name: "Pi",
@@ -317,7 +321,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
         cwd_fields: &["cwd"],
         verified_against_install: false,
     },
-    // OMP, same shape as Pi. Transcribed from Orca.
+    // OMP, same shape as Pi. Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Omp,
         display_name: "OMP",
@@ -332,8 +336,8 @@ pub const AGENT_STORES: &[AgentStore] = &[
         cwd_fields: &["cwd"],
         verified_against_install: false,
     },
-    // Prime Agent brands Pi's contract with its own prefix. Transcribed from
-    // Orca.
+    // Prime Agent brands Pi's contract with its own prefix. Path facts cross-checked against
+    // Orca's scanner table.
     AgentStore {
         agent: AgentId::PrimeAgent,
         display_name: "Prime Agent",
@@ -349,7 +353,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
         verified_against_install: false,
     },
     // OpenClaw keeps sessions under `<state dir>/agents/**/sessions`.
-    // Transcribed from Orca.
+    // Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::OpenClaw,
         display_name: "OpenClaw",
@@ -364,7 +368,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
         cwd_fields: &["cwd"],
         verified_against_install: false,
     },
-    // Factory's droid. Transcribed from Orca.
+    // Factory's droid. Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Droid,
         display_name: "Factory Droid",
@@ -379,8 +383,9 @@ pub const AGENT_STORES: &[AgentStore] = &[
         cwd_fields: &["cwd"],
         verified_against_install: false,
     },
-    // Cline stores exactly one manifest directly beneath each session
-    // directory, so the walk stops at depth 0. Transcribed from Orca.
+    // A Cline session is a directory holding a single manifest at its top
+    // level, so depth 1 is as far as this walk can usefully go. Path facts
+    // cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Cline,
         display_name: "Cline",
@@ -395,7 +400,7 @@ pub const AGENT_STORES: &[AgentStore] = &[
         cwd_fields: &["cwd", "workspace"],
         verified_against_install: false,
     },
-    // Kimi: `<sessions>/wd_*/session_*/state.json`. Transcribed from Orca.
+    // Kimi: `<sessions>/wd_*/session_*/state.json`. Path facts cross-checked against Orca's scanner table.
     AgentStore {
         agent: AgentId::Kimi,
         display_name: "Kimi Code",

@@ -47,8 +47,9 @@ use crate::model::{AgentId, AgentSession, Confidence, Evidence, Installed, ToolI
 
 /// Encode a working directory the way Claude Code names its project bucket.
 ///
-/// One dash per non-alphanumeric character, runs preserved. Exposed because a
-/// caller that knows the directory it cares about can find the bucket directly
+/// Each character outside `[A-Za-z0-9]` becomes its own dash, so a run of two
+/// separators yields two dashes rather than one. Exposed because a caller that
+/// already knows the directory it cares about can address the bucket directly
 /// instead of scanning all of them.
 pub fn encode_project_dir(path: &Path) -> String {
     let text = path.to_string_lossy();

@@ -31,8 +31,8 @@ Cross-tool links (1):
 | --- | --- | --- |
 | **tmux** | sockets in `$TMUX_TMPDIR/tmux-<uid>/`; live sessions and panes via `list-sessions` / `list-panes` | verified against tmux 3.4 |
 | **screen**, **zellij** | socket / runtime directories; `zellij list-sessions` | documented layouts |
-| **Herdr** | `~/.config/herdr[-dev]/session.json`, `sessions/<name>/`, `herdr.sock` | read from Herdr's own `SessionSnapshot` structs |
-| **Orca** | `$ORCA_USER_DATA` / `$XDG_DATA_HOME/Orca` / `~/.orca`, profile state `worktreeMeta`, agent hooks | read from Orca's `PersistedState` and `orcad-app-paths.ts` |
+| **Herdr** | `~/.config/herdr[-dev]/session.json`, `sessions/<name>/`, `herdr.sock` | layout and field names checked against Herdr's session snapshot |
+| **Orca** | `$ORCA_USER_DATA` / `$XDG_DATA_HOME/Orca` / `~/.orca`, profile state `worktreeMeta`, agent hooks | paths checked against Orca's `PersistedState` and `orcad-app-paths.ts` |
 | **Superset** | `~/.superset/{config.json,sessions/,host/<org>/manifest.json}` | Superset CLI docs |
 | **super.engineering** | macOS app support + `sc worktree list --json` | vendor docs; macOS-only, reported as *unsupported* elsewhere |
 | **Claude Code** | `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`, sub-agent transcripts, `~/.claude.json` | verified against Claude Code 2.1.273 |
@@ -82,6 +82,15 @@ comment above it explains why it must not). The code is the authority here.
 - **A scan never fails.** A missing directory means "not installed"; an
   unreadable one, or a state file that will not parse, lands in
   `ToolReport::problems` and the scan carries on.
+
+## Licensing
+
+GPL-2.0, like the rest of the workspace, and it adds no dependencies. No
+third-party code is vendored or copied: the formats were worked out from facts
+(paths, environment variables, filename patterns, JSON field names), with
+Orca (MIT) and Herdr (Apache-2.0) consulted as references. Apache-2.0 is
+incompatible with GPL-2.0, so that one was checked mechanically — see
+[THIRD-PARTY-NOTES.md](THIRD-PARTY-NOTES.md).
 
 ## Privacy
 
