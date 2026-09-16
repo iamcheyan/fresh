@@ -62,6 +62,21 @@ impl Default for WalkOptions<'_> {
     }
 }
 
+/// The options [`FileSystem::walk_files`] walks with.
+///
+/// Named rather than inlined so the one thing that must not drift is directly
+/// testable: `walk_files` has never had an entry limit, and project-wide
+/// search and grep walk through it with no cap of their own, so inheriting
+/// [`WalkOptions::default`]'s would stop them partway through a large
+/// repository and still report the search as complete.
+pub(crate) fn walk_files_options<'a>(skip_dirs: &'a [&'a str]) -> WalkOptions<'a> {
+    WalkOptions {
+        skip_dirs,
+        max_entries: usize::MAX,
+        ..WalkOptions::default()
+    }
+}
+
 /// One entry from a [`FileSystem::walk`].
 #[derive(Debug, Clone)]
 pub struct WalkEntry<'a> {
@@ -831,10 +846,7 @@ pub trait FileSystem: Send + Sync {
         cancel: &std::sync::atomic::AtomicBool,
         on_file: &mut dyn FnMut(&Path, &str) -> bool,
     ) -> io::Result<()> {
-        let opts = WalkOptions {
-            skip_dirs,
-            ..WalkOptions::default()
-        };
+        let opts = walk_files_options(skip_dirs);
         self.walk(root, &opts, cancel, &mut |entry| {
             if entry.entry_type == EntryType::File {
                 on_file(entry.path, entry.rel)
@@ -1376,6 +1388,35 @@ impl StdFileSystem {
         Some(rc == 0)
     }
 
+    /// `FileMetadata` for a walked entry, without a per-entry syscall.
+    ///
+    /// [`Self::build_metadata`] asks the kernel whether the path is writable,
+    /// which is more accurate (it sees ACLs and read-only mounts) but costs a
+    /// `faccessat` per call — and a walk calls it once per file. Quick Open,
+    /// project search and grep walk tens of thousands of files and read none
+    /// of this, so a walk derives `is_readonly` from the mode bits it already
+    /// has, against a uid/group set resolved once for the whole walk.
+    #[cfg(unix)]
+    fn build_metadata_for_walk(
+        path: &Path,
+        meta: &std::fs::Metadata,
+        euid: u32,
+        groups: &[u32],
+    ) -> FileMetadata {
+        use std::os::unix::fs::MetadataExt;
+        let permissions = FilePermissions::from_std(meta.permissions());
+        let is_readonly = permissions.is_readonly_for_user(euid, meta.uid(), meta.gid(), groups);
+        FileMetadata {
+            size: meta.len(),
+            modified: meta.modified().ok(),
+            permissions: Some(permissions),
+            is_hidden: Self::is_hidden(path),
+            is_readonly,
+            uid: Some(meta.uid()),
+            gid: Some(meta.gid()),
+        }
+    }
+
     /// Build FileMetadata from std::fs::Metadata
     fn build_metadata(path: &Path, meta: &std::fs::Metadata) -> FileMetadata {
         #[cfg(unix)]
@@ -1661,6 +1702,10 @@ impl FileSystem for StdFileSystem {
         // (dir, depth) — depth 1 is a direct child of root.
         let mut stack = vec![(root.to_path_buf(), 1usize)];
         let mut yielded = 0usize;
+        // Resolved once for the whole walk, not once per entry: it is three
+        // syscalls and an allocation.
+        #[cfg(unix)]
+        let user = std::sync::LazyLock::new(Self::current_user_groups);
 
         while let Some((dir, depth)) = stack.pop() {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1712,13 +1757,24 @@ impl FileSystem for StdFileSystem {
                         continue;
                     };
                     let rel_str = rel.to_string_lossy().replace('\\', "/");
-                    // Locally the entry already holds this, so honouring
-                    // `metadata` costs a `DirEntry::metadata` call rather than
-                    // a fresh `stat`.
-                    // Free here: the directory entry already holds it.
+                    // Not free: `DirEntry::metadata` is a real `stat` (only
+                    // the file *type* comes back with `readdir`). That is the
+                    // price of `metadata` being mandatory, and it is why the
+                    // walk uses the syscall-free builder rather than the one
+                    // that also asks the kernel about writability per entry.
                     let metadata = entry.metadata().ok().map_or_else(
                         || FileMetadata::new(0),
-                        |meta| Self::build_metadata(&path, &meta),
+                        |meta| {
+                            #[cfg(unix)]
+                            {
+                                let (euid, groups) = &*user;
+                                Self::build_metadata_for_walk(&path, &meta, *euid, groups)
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                Self::build_metadata(&path, &meta)
+                            }
+                        },
                     );
                     if !on_entry(WalkEntry {
                         path: &path,
@@ -2756,6 +2812,152 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(found.is_empty());
+    }
+
+    /// Collect `(rel, is_dir)` from a walk of `make_walk_tree` under `opts`.
+    fn walk_rels(opts: &WalkOptions<'_>) -> Vec<(String, bool)> {
+        let tmp = make_walk_tree();
+        let fs = StdFileSystem;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut seen = Vec::new();
+        fs.walk(tmp.path(), opts, &cancel, &mut |entry| {
+            seen.push((
+                entry.rel.to_string(),
+                entry.entry_type == EntryType::Directory,
+            ));
+            true
+        })
+        .expect("walk");
+        seen.sort();
+        seen
+    }
+
+    #[test]
+    fn include_hidden_is_what_makes_a_dotfile_store_visible() {
+        // The whole reason the knob exists: every agent store is a dotfile
+        // directory, so a walk without this returns nothing useful there.
+        let hidden: Vec<_> = walk_rels(&WalkOptions {
+            include_hidden: true,
+            ..WalkOptions::default()
+        })
+        .into_iter()
+        .map(|(rel, _)| rel)
+        .collect();
+        assert!(hidden.iter().any(|rel| rel == ".hidden_file"), "{hidden:?}");
+        assert!(
+            hidden.iter().any(|rel| rel == ".hidden_dir/secret.txt"),
+            "{hidden:?}"
+        );
+
+        let visible: Vec<_> = walk_rels(&WalkOptions::default())
+            .into_iter()
+            .map(|(rel, _)| rel)
+            .collect();
+        assert!(
+            !visible.iter().any(|rel| rel.starts_with('.')),
+            "{visible:?}"
+        );
+    }
+
+    #[test]
+    fn include_dirs_decides_whether_directories_are_reported() {
+        let with_dirs = walk_rels(&WalkOptions {
+            include_dirs: true,
+            ..WalkOptions::default()
+        });
+        assert!(
+            with_dirs
+                .iter()
+                .any(|(rel, is_dir)| rel == "sub" && *is_dir),
+            "{with_dirs:?}"
+        );
+
+        let without = walk_rels(&WalkOptions::default());
+        assert!(
+            without.iter().all(|(_, is_dir)| !*is_dir),
+            "files only: {without:?}"
+        );
+    }
+
+    #[test]
+    fn max_depth_bounds_how_far_below_the_root_a_walk_goes() {
+        // Depth 1 is a direct child, so `sub/c.txt` is depth 2.
+        let shallow: Vec<_> = walk_rels(&WalkOptions {
+            max_depth: 1,
+            ..WalkOptions::default()
+        })
+        .into_iter()
+        .map(|(rel, _)| rel)
+        .collect();
+        assert!(shallow.contains(&"a.txt".to_string()), "{shallow:?}");
+        assert!(
+            !shallow.iter().any(|rel| rel.contains('/')),
+            "nothing below the first level: {shallow:?}"
+        );
+
+        let deeper: Vec<_> = walk_rels(&WalkOptions {
+            max_depth: 2,
+            ..WalkOptions::default()
+        })
+        .into_iter()
+        .map(|(rel, _)| rel)
+        .collect();
+        assert!(deeper.contains(&"sub/c.txt".to_string()), "{deeper:?}");
+        assert!(
+            !deeper.contains(&"sub/deep/d.txt".to_string()),
+            "still bounded: {deeper:?}"
+        );
+    }
+
+    #[test]
+    fn max_entries_stops_the_walk() {
+        let capped = walk_rels(&WalkOptions {
+            max_entries: 2,
+            ..WalkOptions::default()
+        });
+        assert_eq!(capped.len(), 2, "{capped:?}");
+    }
+
+    #[test]
+    fn walk_files_is_not_capped_by_the_default_entry_limit() {
+        // Project search and grep walk through `walk_files` with no cap of
+        // their own; inheriting the default's would truncate a large
+        // repository and still report the search as complete.
+        assert_eq!(
+            WalkOptions::default().max_entries,
+            50_000,
+            "the default is capped on purpose"
+        );
+        assert_eq!(
+            walk_files_options(&[]).max_entries,
+            usize::MAX,
+            "and walk_files must not inherit that cap"
+        );
+    }
+
+    #[test]
+    fn a_walked_entry_carries_the_metadata_the_caller_was_promised() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = StdFileSystem;
+        fs.write_file(&tmp.path().join("sized.txt"), b"1234567890")
+            .unwrap();
+
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut size = None;
+        let mut modified = None;
+        fs.walk(tmp.path(), &WalkOptions::default(), &cancel, &mut |entry| {
+            size = Some(entry.metadata.size);
+            modified = entry.metadata.modified;
+            true
+        })
+        .expect("walk");
+
+        assert_eq!(
+            size,
+            Some(10),
+            "size comes from the walk, not a second stat"
+        );
+        assert!(modified.is_some(), "and so does the mtime");
     }
 
     #[test]
