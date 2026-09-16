@@ -521,6 +521,93 @@ pub fn write_fresh_dts() -> Result<(), String> {
     let plugin_api_trailer = r#"
 
 /**
+ * A machine opened with `editor.openMachine`. Its methods carry their
+ * own machine, so a scanner is handed one of these and never has to
+ * think about which computer it is talking to.
+ *
+ * Close it when done; the connection is held open until you do.
+ */
+interface FreshMachine {
+  /** Handle id. Also accepted by the underscore-prefixed raw ops. */
+  id: number;
+  /** "linux" | "macos" | "windows" | "other", as the machine reports. */
+  platform: string;
+  /** The machine's home directory. */
+  home: string;
+  /** The authority's own label, empty for a plain local one. */
+  label: string;
+  walkTree(root: string, options?: WalkTreeOptions): Promise<WalkTreeResult>;
+  readFilePrefixes(requests: { path: string; maxBytes: number }[]): Promise<FilePrefix[]>;
+  run(program: string, args?: string[], cwd?: string): Promise<CommandResult>;
+  /** Idempotent: closing twice is not an error. */
+  close(): Promise<boolean>;
+}
+
+interface WalkTreeOptions {
+  /** Directory basenames skipped at every depth. */
+  skipDirs?: string[];
+  /** Report dot-prefixed entries. Off by default, and required to see
+   *  anything under `~/.config` and friends. */
+  includeHidden?: boolean;
+  /** Report directories as well as files. */
+  includeDirs?: boolean;
+  /** Depth below the root; 1 is a direct child. Omitted means unbounded. */
+  maxDepth?: number;
+  /** Stop after this many entries, setting `truncated`. */
+  maxEntries?: number;
+}
+
+interface WalkTreeEntry {
+  path: string;
+  /** Path relative to the walk root, "/"-separated on every platform. */
+  rel: string;
+  kind: "file" | "dir" | "symlink";
+  /** Unix timestamp, from the same walk — no second stat. */
+  mtime: number;
+  size: number;
+}
+
+interface WalkTreeResult {
+  entries: WalkTreeEntry[];
+  /** True when `maxEntries` stopped the walk early. */
+  truncated: boolean;
+}
+
+/** One result from `readFilePrefixes`: `text` on success, else `error`. */
+interface FilePrefix {
+  path: string;
+  text?: string;
+  error?: string;
+}
+
+/** A non-zero `code` resolves rather than rejecting. */
+interface CommandResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * The shapes plugins actually call. The macro-generated
+ * `_walkTreeOn` / `_readFilePrefixesOn` / `_runOnTargetOn` take a
+ * machine id as their first argument; these bind it for you — either
+ * to an opened machine (via `openMachine`) or to 0, meaning the active
+ * window's own authority.
+ */
+interface EditorAPI {
+  /** Open a machine without attaching it to a window. `spec` is the
+   *  same payload `setAuthority` takes. */
+  openMachine(spec: unknown): Promise<FreshMachine>;
+  /** Walk a subtree on the active window's authority. */
+  walkTree(root: string, options?: WalkTreeOptions): Promise<WalkTreeResult>;
+  /** Read many file headers on the active window's authority. */
+  readFilePrefixes(requests: { path: string; maxBytes: number }[]): Promise<FilePrefix[]>;
+  /** Run a command on the active window's authority — over a remote
+   *  one it runs there, unlike `spawnHostProcess`. */
+  runOnTarget(program: string, args?: string[], cwd?: string): Promise<CommandResult>;
+}
+
+/**
  * Typed overload of `editor.getPluginApi`. When the caller passes a
  * key that some loaded plugin declared in `FreshPluginRegistry`, the
  * return type is narrowed to that plugin's API. Unknown names fall

@@ -1881,7 +1881,7 @@ impl JsEditorApi {
     /// pass `{}` for the defaults.
     #[plugin_api(
         async_promise,
-        js_name = "walkTree",
+        js_name = "_walkTreeOn",
         ts_return = "{ entries: { path: string; rel: string; kind: 'file' | 'dir' | 'symlink'; mtime: number; size: number }[]; truncated: boolean }"
     )]
     #[qjs(rename = "_walkTreeStart")]
@@ -1949,7 +1949,7 @@ impl JsEditorApi {
     /// this over a remote authority pays for every one of them.
     #[plugin_api(
         async_promise,
-        js_name = "readFilePrefixes",
+        js_name = "_readFilePrefixesOn",
         ts_return = "{ path: string; text?: string; error?: string }[]"
     )]
     #[qjs(rename = "_readFilePrefixesStart")]
@@ -2007,7 +2007,7 @@ impl JsEditorApi {
     /// `""` for `cwd` to let the command choose its own.
     #[plugin_api(
         async_promise,
-        js_name = "runOnTarget",
+        js_name = "_runOnTargetOn",
         ts_return = "{ code: number; stdout: string; stderr: string }"
     )]
     #[qjs(rename = "_runOnTargetStart")]

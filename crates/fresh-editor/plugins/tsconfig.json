@@ -13,6 +13,7 @@
   },
   "files": [
     "lib/fresh.d.ts",
+    "lib/agent_scanner.ts",
     "lib/finder.ts",
     "lib/git_history.ts",
     "lib/index.ts",
@@ -22,6 +23,7 @@
     "lib/types.ts",
     "lib/virtual-buffer-factory.ts",
     "lib/widgets.ts",
+    "agent_sessions.ts",
     "asm-lsp.ts",
     "audit_mode.ts",
     "clangd_support.ts",
