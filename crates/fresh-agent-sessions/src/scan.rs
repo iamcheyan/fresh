@@ -63,15 +63,20 @@ pub fn scan_with(env: &Env, options: &ScanOptions) -> Discovery {
     // Everything else is table-driven; see `crate::catalog`.
     for store in AGENT_STORES {
         let mut report = ToolReport::absent(ToolId::Agent(store.agent), store.display_name);
-        let (sessions, evidence) = scan_store(store, env, limit, &mut report.problems);
-        if !evidence.is_empty() {
+        let scan = scan_store(store, env, limit, &mut report.problems);
+        // A store directory that exists, or the agent's binary on PATH. An
+        // environment variable on its own proves neither: `GOOSE_DATA_DIR`
+        // exported by a shell profile says where goose *would* keep its
+        // sessions, not that goose is here.
+        let executable = env.which(store.agent.command_names()[0]);
+        if scan.root_exists || executable.is_some() {
             report.installed = Installed::Present {
                 version: None,
-                executable: env.which(store.agent.command_names()[0]),
+                executable,
             };
         }
-        report.evidence = evidence;
-        report.agent_sessions = sessions;
+        report.evidence = scan.evidence;
+        report.agent_sessions = scan.sessions;
         tools.push(report);
     }
 
@@ -248,6 +253,147 @@ mod tests {
             claude.problems.iter().any(|p| p.contains("limit")),
             "truncation must be reported: {:?}",
             claude.problems
+        );
+    }
+
+    #[test]
+    fn an_env_var_alone_does_not_make_an_agent_installed() {
+        // A shell profile that exports GOOSE_DATA_DIR says where goose would
+        // keep sessions, not that goose is here.
+        let home = tempfile::tempdir().expect("tempdir");
+        let options = ScanOptions {
+            include_absent: true,
+            ..ScanOptions::default()
+        };
+        let env = Env::fake(home.path()).with_var("GOOSE_DATA_DIR", "/definitely/not/here");
+
+        let discovery = scan_with(&env, &options);
+
+        let goose = discovery
+            .tools
+            .iter()
+            .find(|report| report.tool == ToolId::Agent(AgentId::Goose))
+            .expect("goose report");
+        assert!(
+            matches!(goose.installed, crate::model::Installed::Absent),
+            "got {:?}",
+            goose.installed
+        );
+        assert!(
+            goose.evidence.iter().any(|e| e.locator == "GOOSE_DATA_DIR"),
+            "the override is still worth reporting to whoever is debugging"
+        );
+    }
+
+    #[test]
+    fn a_workspace_id_shared_across_tools_does_not_steal_the_attribution() {
+        // Orca has the repo root and its worktree; Herdr independently has a
+        // workspace whose id happens to match. Depths keyed by bare id let
+        // Herdr's shallow path stand in for Orca's deep one, and the session
+        // gets attributed to the outer repo.
+        let home = tempfile::tempdir().expect("tempdir");
+        let data = home.path().join(".orca");
+        std::fs::create_dir_all(&data).expect("create");
+        std::fs::write(
+            data.join("state.json"),
+            r#"{"schemaVersion":1,"repos":[{"id":"r","path":"/src/repo"}],
+                "worktreeMeta":{
+                  "outer":{"path":"/src/repo","repoId":"r"},
+                  "inner":{"path":"/src/repo/.worktrees/feat","repoId":"r"}}}"#,
+        )
+        .expect("write state");
+
+        // A Herdr workspace whose id collides with Orca's deep one, at a
+        // shallow path.
+        let config = home.path().join(".config").join("herdr");
+        std::fs::create_dir_all(&config).expect("create config");
+        std::fs::write(
+            config.join("session.json"),
+            r#"{"version":3,"workspaces":[{"id":"inner","identity_cwd":"/elsewhere",
+                "tabs":[{"panes":{}}]}]}"#,
+        )
+        .expect("write snapshot");
+
+        let bucket = home.path().join(".claude").join("projects").join("-x");
+        std::fs::create_dir_all(&bucket).expect("create bucket");
+        std::fs::write(
+            bucket.join("sess.jsonl"),
+            r#"{"sessionId":"sess","cwd":"/src/repo/.worktrees/feat"}"#,
+        )
+        .expect("write transcript");
+
+        let discovery = scan(&Env::fake(home.path()));
+
+        let workspace_links: Vec<_> = discovery
+            .links
+            .iter()
+            .filter(|link| link.reason == LinkReason::CwdInsideWorkspace)
+            .collect();
+        assert_eq!(workspace_links.len(), 1, "links: {workspace_links:?}");
+        assert_eq!(
+            workspace_links[0].host, "orca/inner",
+            "the deepest *Orca* workspace owns it, not whatever shares the name"
+        );
+    }
+
+    #[test]
+    fn an_unparsed_store_is_reported_as_present_without_inventing_sessions() {
+        // opencode keeps state in SQLite. Emitting a row per .db file would
+        // claim sessions we cannot identify.
+        let home = tempfile::tempdir().expect("tempdir");
+        let dir = home.path().join(".local").join("share").join("opencode");
+        std::fs::create_dir_all(&dir).expect("create");
+        std::fs::write(dir.join("storage.db"), b"SQLite format 3\0").expect("write");
+
+        let discovery = scan(&Env::fake(home.path()));
+
+        let opencode = discovery
+            .tools
+            .iter()
+            .find(|report| report.tool == ToolId::Agent(AgentId::OpenCode))
+            .expect("opencode report");
+        assert!(matches!(
+            opencode.installed,
+            crate::model::Installed::Present { .. }
+        ));
+        assert!(
+            opencode.agent_sessions.is_empty(),
+            "the format is not parsed, so no session may be claimed"
+        );
+        assert!(
+            opencode
+                .evidence
+                .iter()
+                .any(|e| e.locator.ends_with("storage.db")),
+            "but the file itself is still reported"
+        );
+    }
+
+    #[test]
+    fn a_truncated_catalog_walk_says_so() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let dir = home.path().join(".factory").join("sessions");
+        std::fs::create_dir_all(&dir).expect("create");
+        for i in 0..5 {
+            std::fs::write(dir.join(format!("s{i}.jsonl")), r#"{"cwd":"/w"}"#).expect("write");
+        }
+
+        let options = ScanOptions {
+            max_sessions_per_tool: 2,
+            ..ScanOptions::default()
+        };
+        let discovery = scan_with(&Env::fake(home.path()), &options);
+
+        let droid = discovery
+            .tools
+            .iter()
+            .find(|report| report.tool == ToolId::Agent(AgentId::Droid))
+            .expect("droid report");
+        assert_eq!(droid.agent_sessions.len(), 2);
+        assert!(
+            droid.problems.iter().any(|p| p.contains("limit")),
+            "silent truncation is how a picker quietly loses sessions: {:?}",
+            droid.problems
         );
     }
 

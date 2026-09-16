@@ -51,14 +51,22 @@ use crate::model::{
     AgentId, Confidence, Evidence, Installed, MuxSession, Pane, ToolId, ToolReport, Workspace,
 };
 
-/// The config directories to check, release build first.
-fn config_dirs(env: &Env) -> Vec<PathBuf> {
+/// The config directories to check, release build first, each with the label
+/// that distinguishes its sessions from the other's.
+fn config_dirs(env: &Env) -> Vec<(PathBuf, &'static str)> {
     let base = env
         .var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| env.home_join([".config"]));
-    vec![base.join("herdr"), base.join("herdr-dev")]
+    // A debug build of Herdr uses `herdr-dev` and is a genuinely separate
+    // install with its own sessions. Both name their default session
+    // "default", so folding them into one report collides that id — and
+    // collides workspace ids with it. Carry the variant so ids stay distinct.
+    vec![
+        (base.join("herdr"), ""),
+        (base.join("herdr-dev"), "herdr-dev"),
+    ]
 }
 
 pub fn scan(env: &Env) -> ToolReport {
@@ -75,13 +83,17 @@ pub fn scan(env: &Env) -> ToolReport {
         };
     }
 
-    for config in config_dirs(env) {
+    for (config, variant) in config_dirs(env) {
         if !config.is_dir() {
             continue;
         }
         report
             .evidence
-            .push(Evidence::dir(&config).saying("Herdr config directory"));
+            .push(Evidence::dir(&config).saying(if variant.is_empty() {
+                "Herdr config directory".to_string()
+            } else {
+                format!("Herdr config directory ({variant} build)")
+            }));
         if matches!(report.installed, Installed::Absent) {
             report.installed = Installed::Present {
                 version: None,
@@ -90,7 +102,7 @@ pub fn scan(env: &Env) -> ToolReport {
         }
 
         // The default session lives in the config directory itself.
-        read_session_dir(&config, "default", &mut report);
+        read_session_dir(&config, &qualify(variant, "default"), &mut report);
 
         let named = config.join("sessions");
         if let Ok(entries) = std::fs::read_dir(&named) {
@@ -102,12 +114,22 @@ pub fn scan(env: &Env) -> ToolReport {
                     .and_then(|n| n.to_str())
                     .unwrap_or("unnamed")
                     .to_string();
-                read_session_dir(&dir, &name, &mut report);
+                read_session_dir(&dir, &qualify(variant, &name), &mut report);
             }
         }
     }
 
     report
+}
+
+/// Prefix a session name with its install variant, so a release and a debug
+/// Herdr can both have a session called "default" without colliding.
+fn qualify(variant: &str, name: &str) -> String {
+    if variant.is_empty() {
+        name.to_string()
+    } else {
+        format!("{variant}/{name}")
+    }
 }
 
 /// Read one session directory: its snapshot and its sockets.
@@ -151,10 +173,13 @@ fn read_session_dir(dir: &Path, name: &str, report: &mut ToolReport) {
 
     let mut panes = Vec::new();
     for (index, workspace) in snapshot.workspaces.iter().enumerate() {
-        let id = workspace
-            .id
-            .clone()
-            .unwrap_or_else(|| format!("{name}#{index}"));
+        // Qualified by session name: Herdr mints workspace ids per session, so
+        // two sessions can each carry a workspace called "ws-1", and an
+        // ambiguous id makes correlation attribute a session to the wrong one.
+        let id = match workspace.id.clone() {
+            Some(id) => format!("{name}/{id}"),
+            None => format!("{name}#{index}"),
+        };
         report.workspaces.push(Workspace {
             id: id.clone(),
             name: workspace.custom_name.clone(),
@@ -411,7 +436,11 @@ mod tests {
             .iter()
             .map(|pane| pane.id.as_str())
             .collect();
-        assert_eq!(ids, vec!["ws-1/2", "ws-1/10"], "pane 10 sorts after pane 2");
+        assert_eq!(
+            ids,
+            vec!["default/ws-1/2", "default/ws-1/10"],
+            "pane 10 sorts after pane 2, and ids carry their session"
+        );
     }
 
     #[test]
@@ -489,6 +518,38 @@ mod tests {
 
         assert!(report.mux_sessions.is_empty());
         assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+    }
+
+    #[test]
+    fn a_dev_build_does_not_collide_with_the_release_install() {
+        // Both call their default session "default". Folded into one report
+        // they collide, and a correlation keyed on that id picks arbitrarily.
+        let home = tempfile::tempdir().expect("tempdir");
+        install(home.path(), CURRENT);
+        let dev = home.path().join(".config").join("herdr-dev");
+        std::fs::create_dir_all(&dev).expect("create dev config");
+        std::fs::write(dev.join("session.json"), CURRENT).expect("write");
+
+        let report = scan(&Env::fake(home.path()));
+
+        let mut ids: Vec<&str> = report
+            .mux_sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["default", "herdr-dev/default"]);
+
+        let workspace_ids: std::collections::HashSet<&str> = report
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id.as_str())
+            .collect();
+        assert_eq!(
+            workspace_ids.len(),
+            report.workspaces.len(),
+            "workspace ids must stay unique across installs: {workspace_ids:?}"
+        );
     }
 
     #[test]

@@ -387,6 +387,14 @@ pub struct AgentSession {
     /// True when the transcript is a sub-agent's, not a top-level conversation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_subagent: bool,
+    /// For a sub-agent, the id of the conversation that spawned it.
+    ///
+    /// Sub-agent transcripts record the *parent's* session id, so it cannot
+    /// also serve as the row's own `id` without making `id` non-unique — and a
+    /// non-unique id turns one host pane into N identical correlation links.
+    /// The parent is kept here and `id` is made distinct instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub confidence: Confidence,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<Evidence>,
@@ -649,11 +657,18 @@ fn pane_links(host: &str, pane: &Pane, sessions: &[(String, &AgentSession)]) -> 
 /// a session running in the latter, and reporting both makes the session look
 /// like it lives in two workspaces at once. The longer path is the real one.
 fn keep_most_specific_workspace_links(links: &mut Vec<Link>, discovery: &Discovery) {
-    let mut depth_by_host: BTreeMap<&str, usize> = BTreeMap::new();
+    // Keyed by the same `"<tool>/<id>"` string the links carry. Workspace ids
+    // are only unique within a tool — "default" and "main" are not rare — so
+    // keying on the bare id lets one tool's workspace supply another tool's
+    // depth, and the session gets attributed to the wrong one.
+    let mut depth_by_host: BTreeMap<String, usize> = BTreeMap::new();
     for tool in &discovery.tools {
         for workspace in &tool.workspaces {
             if let Some(path) = workspace.path.as_deref() {
-                depth_by_host.insert(workspace.id.as_str(), path.components().count());
+                depth_by_host.insert(
+                    format!("{}/{}", tool.tool.as_str(), workspace.id),
+                    path.components().count(),
+                );
             }
         }
     }
@@ -677,8 +692,6 @@ fn keep_most_specific_workspace_links(links: &mut Vec<Link>, discovery: &Discove
     });
 }
 
-fn host_depth(host: &str, depth_by_host: &BTreeMap<&str, usize>) -> usize {
-    host.split_once('/')
-        .and_then(|(_, id)| depth_by_host.get(id).copied())
-        .unwrap_or(0)
+fn host_depth(host: &str, depth_by_host: &BTreeMap<String, usize>) -> usize {
+    depth_by_host.get(host).copied().unwrap_or(0)
 }

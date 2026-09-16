@@ -414,10 +414,16 @@ fn read_sc_worktrees(output: &str, report: &mut ToolReport) {
                 .get("name")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
+            // The documented row is `{type, id, url, primary}` — there is no
+            // `path` key, so reading one left every workspace with `path:
+            // None` and unable to correlate with anything. The location is in
+            // `url`, as a `file://` URL. `path` is still preferred if a future
+            // version adds it.
             path: row
                 .get("path")
                 .and_then(serde_json::Value::as_str)
-                .map(PathBuf::from),
+                .map(PathBuf::from)
+                .or_else(|| url.and_then(path_from_file_url)),
             repo: None,
             branch: row
                 .get("branch")
@@ -435,6 +441,27 @@ fn read_sc_worktrees(output: &str, report: &mut ToolReport) {
             ],
         });
     }
+}
+
+/// The filesystem path inside a `file://` URL.
+///
+/// Deliberately minimal — enough for the local, already-decoded paths `sc`
+/// emits, and nothing more. A URL with a host (`file://server/share`) is not a
+/// local path and is rejected rather than silently turned into one.
+fn path_from_file_url(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let path = if let Some(stripped) = rest.strip_prefix("localhost/") {
+        // `file://localhost/srv/a` is the same place as `file:///srv/a`.
+        format!("/{stripped}")
+    } else if rest.starts_with('/') {
+        rest.to_string()
+    } else {
+        return None;
+    };
+    // Percent-decoding is not attempted: `sc` emits paths that round-trip as
+    // written, and a half-hearted decoder would corrupt a directory whose name
+    // legitimately contains a percent sign.
+    (!path.contains('%')).then(|| PathBuf::from(path))
 }
 
 #[cfg(test)]
@@ -586,6 +613,34 @@ mod tests {
             "primary is the repo checkout, not a task worktree"
         );
         assert_eq!(report.workspaces[1].is_worktree, Some(true));
+        assert_eq!(
+            report.workspaces[0].path.as_deref(),
+            Some(Path::new("/src/a")),
+            "without a path the workspace can never correlate with a session"
+        );
+    }
+
+    #[test]
+    fn file_urls_become_paths_only_when_they_name_a_local_one() {
+        assert_eq!(
+            path_from_file_url("file:///src/a"),
+            Some(PathBuf::from("/src/a"))
+        );
+        assert_eq!(
+            path_from_file_url("file://localhost/src/a"),
+            Some(PathBuf::from("/src/a"))
+        );
+        assert_eq!(
+            path_from_file_url("file://server/share"),
+            None,
+            "a remote host is not a local path"
+        );
+        assert_eq!(path_from_file_url("https://example.com/x"), None);
+        assert_eq!(
+            path_from_file_url("file:///a%20b"),
+            None,
+            "not decoded, so not guessed at"
+        );
     }
 
     #[test]

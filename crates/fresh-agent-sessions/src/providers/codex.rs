@@ -43,11 +43,23 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
     let mut report = ToolReport::absent(ToolId::CodexCli, "Codex CLI");
     let home = codex_home(env);
 
-    if env.var("CODEX_HOME").is_some() {
-        report.evidence.push(Evidence::env_var(
-            "CODEX_HOME",
-            home.to_string_lossy().into_owned(),
-        ));
+    // Only when the variable actually moved the store. `dir_override` ignores a
+    // relative value, and reporting the *resolved default* under the variable's
+    // name would claim provenance the variable never had — the one thing a
+    // crate built on evidence must not do.
+    match env.var("CODEX_HOME") {
+        Some(value) if Path::new(value).is_absolute() => {
+            report
+                .evidence
+                .push(Evidence::env_var("CODEX_HOME", value.to_string()));
+        }
+        Some(value) => {
+            report.note_problem(format!(
+                "CODEX_HOME is set to a relative path ({value}); ignoring it and reading {}",
+                home.display()
+            ));
+        }
+        None => {}
     }
     if let Some(path) = env.which("codex") {
         report.evidence.push(Evidence::executable(&path));
@@ -258,6 +270,7 @@ fn session_from_rollout(path: &Path, titles: &[(String, String)]) -> AgentSessio
         modified_unix: modified_unix(path),
         agent_version: None,
         is_subagent: false,
+        parent_session_id: None,
         confidence: if parsed.is_some() {
             Confidence::Probable
         } else {
@@ -448,6 +461,28 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let env = Env::fake(home.path()).with_var("CODEX_HOME", "relative/path");
         assert_eq!(codex_home(&env), home.path().join(".codex"));
+    }
+
+    #[test]
+    fn a_rejected_codex_home_is_not_reported_as_if_it_had_applied() {
+        // Claiming the resolved default under the variable's name is a
+        // provenance lie, in a crate whose entire premise is provenance.
+        let home = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(home.path().join(".codex")).expect("create");
+        let env = Env::fake(home.path()).with_var("CODEX_HOME", "relative/path");
+
+        let report = scan(&env, 10);
+
+        assert!(
+            !report.evidence.iter().any(|e| e.locator == "CODEX_HOME"),
+            "the variable did not move anything, so it is not evidence: {:?}",
+            report.evidence
+        );
+        assert!(
+            report.problems.iter().any(|p| p.contains("relative")),
+            "but the user should still be told it was ignored: {:?}",
+            report.problems
+        );
     }
 
     #[test]

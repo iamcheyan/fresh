@@ -142,7 +142,7 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
     }
     if truncated {
         report.note_problem(format!(
-            "stopped at the {limit}-session limit; the sessions reported are the first \
+            "stopped at the {limit}-conversation limit; the sessions reported are the first \
              {limit} in directory order, then sorted by modification time — not necessarily \
              the {limit} most recent on disk"
         ));
@@ -156,7 +156,12 @@ pub fn scan(env: &Env, limit: usize) -> ToolReport {
     report
 }
 
-/// Returns true if the limit was reached and files were left unread.
+/// Returns true if the limit was reached and transcripts were left unread.
+///
+/// The limit counts *resumable conversations*, not rows: sub-agent transcripts
+/// ride along with the parent that owns them. Counting rows would let one
+/// heavily-delegating session exhaust the whole budget by itself and return a
+/// page with a single resumable entry on it.
 fn scan_bucket(bucket: &Path, limit: usize, report: &mut ToolReport) -> bool {
     let entries = match read_sorted_dir(bucket) {
         Ok(entries) => entries,
@@ -167,11 +172,11 @@ fn scan_bucket(bucket: &Path, limit: usize, report: &mut ToolReport) -> bool {
     };
 
     for path in entries {
-        if report.agent_sessions.len() >= limit {
-            return true;
-        }
         if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
             continue;
+        }
+        if top_level_count(report) >= limit {
+            return true;
         }
         let session = read_session(&path, bucket, false);
         // The sibling directory named after the session holds its sub-agents.
@@ -181,6 +186,23 @@ fn scan_bucket(bucket: &Path, limit: usize, report: &mut ToolReport) -> bool {
                 for child in children {
                     if child.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
                         let mut sub = read_session(&child, bucket, true);
+                        // A sub-agent's transcript records its *parent's*
+                        // sessionId. Left as the row's id it would collide with
+                        // the parent and with every sibling, and one host pane
+                        // naming that id would link to all of them. Keep the
+                        // parent in `parent_session_id` and make the row's own
+                        // id distinct by its transcript's filename.
+                        sub.parent_session_id = Some(std::mem::replace(
+                            &mut sub.id,
+                            format!(
+                                "{}/{}",
+                                session.id,
+                                child
+                                    .file_stem()
+                                    .and_then(|stem| stem.to_str())
+                                    .unwrap_or("subagent")
+                            ),
+                        ));
                         // A sub-agent inherits the parent's directory; its own
                         // transcript may not repeat it.
                         if sub.cwd.is_none() {
@@ -234,6 +256,7 @@ fn read_session(path: &Path, bucket: &Path, is_subagent: bool) -> AgentSession {
         modified_unix: modified_unix(path),
         agent_version: header.version,
         is_subagent,
+        parent_session_id: None,
         confidence,
         evidence,
     }
@@ -286,6 +309,15 @@ fn read_header(path: &Path) -> Header {
         }
     }
     header
+}
+
+/// Resumable conversations found so far, ignoring sub-agent transcripts.
+fn top_level_count(report: &ToolReport) -> usize {
+    report
+        .agent_sessions
+        .iter()
+        .filter(|session| !session.is_subagent)
+        .count()
 }
 
 fn read_sorted_dir(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -420,6 +452,80 @@ mod tests {
             subs[0].cwd.as_deref(),
             Some(Path::new("/repo")),
             "a sub-agent inherits its parent's working directory"
+        );
+    }
+
+    #[test]
+    fn a_subagent_gets_its_own_id_and_names_its_parent() {
+        // A sub-agent transcript records the PARENT's sessionId. Used as the
+        // row's own id it collides with the parent and every sibling, and one
+        // host pane naming that id links to all of them at once.
+        let home = tempfile::tempdir().expect("tempdir");
+        let parent = write_install(
+            home.path(),
+            "-repo",
+            "parent-id",
+            &[r#"{"sessionId":"parent-id","cwd":"/repo"}"#],
+        );
+        let subagents = parent.with_extension("");
+        std::fs::create_dir_all(&subagents).expect("create subagents dir");
+        for task in ["task-1", "task-2"] {
+            std::fs::write(
+                subagents.join(format!("{task}.jsonl")),
+                r#"{"sessionId":"parent-id"}"#,
+            )
+            .expect("write subagent");
+        }
+
+        let report = scan(&Env::fake(home.path()), 100);
+
+        let ids: std::collections::HashSet<&str> = report
+            .agent_sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 3, "every row needs a distinct id: {ids:?}");
+        for sub in report.agent_sessions.iter().filter(|s| s.is_subagent) {
+            assert_eq!(sub.parent_session_id.as_deref(), Some("parent-id"));
+            assert_ne!(sub.id, "parent-id");
+        }
+    }
+
+    #[test]
+    fn the_limit_counts_conversations_not_transcript_files() {
+        // One heavily-delegating session must not exhaust the whole budget:
+        // a limit of 2 should still return 2 resumable conversations.
+        let home = tempfile::tempdir().expect("tempdir");
+        for session in ["a", "b", "c"] {
+            let path = write_install(
+                home.path(),
+                "-repo",
+                session,
+                &[&format!(r#"{{"sessionId":"{session}","cwd":"/repo"}}"#)],
+            );
+            let subagents = path.with_extension("");
+            std::fs::create_dir_all(&subagents).expect("create subagents dir");
+            for task in 0..4 {
+                std::fs::write(
+                    subagents.join(format!("t{task}.jsonl")),
+                    format!(r#"{{"sessionId":"{session}"}}"#),
+                )
+                .expect("write subagent");
+            }
+        }
+
+        let report = scan(&Env::fake(home.path()), 2);
+
+        let resumable = report
+            .agent_sessions
+            .iter()
+            .filter(|session| !session.is_subagent)
+            .count();
+        assert_eq!(resumable, 2, "the limit is a budget of conversations");
+        assert!(
+            report.problems.iter().any(|p| p.contains("limit")),
+            "truncation must be reported: {:?}",
+            report.problems
         );
     }
 

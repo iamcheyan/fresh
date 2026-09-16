@@ -117,14 +117,26 @@ pub fn scan_zellij(env: &Env) -> ToolReport {
         match env.run("zellij", &["list-sessions", "--no-formatting"]) {
             Ok(output) => {
                 for line in output.lines().filter(|line| !line.trim().is_empty()) {
-                    // `<name> [Created ...] (EXITED - ...)` — the name is the
-                    // first whitespace-delimited token.
+                    // `<name> [Created ...] (current)` or `(EXITED - ...)` —
+                    // the name is the first whitespace-delimited token.
                     let name = line.split_whitespace().next().unwrap_or(line).to_string();
+                    // Three states, not two. `(current)` is the session this
+                    // very command ran inside; `(EXITED …)` is dead. Everything
+                    // else is alive but says nothing about whether a client is
+                    // attached, and reporting "not exited" as "attached" turns
+                    // every running detached session into a false positive.
+                    let attached = if line.contains("EXITED") {
+                        Some(false)
+                    } else if line.contains("(current)") {
+                        Some(true)
+                    } else {
+                        None
+                    };
                     report.mux_sessions.push(MuxSession {
                         id: name.clone(),
                         name: Some(name),
                         created_unix: None,
-                        attached: Some(!line.contains("EXITED")),
+                        attached,
                         socket: None,
                         panes: Vec::new(),
                         confidence: Confidence::Certain,
@@ -146,27 +158,31 @@ mod tests {
     use crate::env::StubRunner;
 
     #[test]
-    fn zellij_marks_exited_sessions_as_detached() {
+    fn zellij_distinguishes_current_from_merely_running() {
         let home = tempfile::tempdir().expect("tempdir");
         let bin = home.path().join("bin");
         std::fs::create_dir_all(&bin).expect("create bin");
         std::fs::write(bin.join("zellij"), "#!/bin/sh\n").expect("write");
 
-        let env =
-            Env::fake(home.path())
-                .with_path_dirs([bin])
-                .with_commands(StubRunner::new().returning(
+        let env = Env::fake(home.path()).with_path_dirs([bin]).with_commands(
+            StubRunner::new().returning(
                 "zellij",
                 &["list-sessions", "--no-formatting"],
-                "alpha [Created 1h ago]\nbeta [Created 2h ago] (EXITED - attach to resurrect)\n",
-            ));
+                "alpha [Created 1h ago] (current)\n\
+                 beta [Created 2h ago]\n\
+                 gamma [Created 3h ago] (EXITED - attach to resurrect)\n",
+            ),
+        );
 
         let report = scan_zellij(&env);
 
-        assert_eq!(report.mux_sessions.len(), 2);
-        assert_eq!(report.mux_sessions[0].name.as_deref(), Some("alpha"));
-        assert_eq!(report.mux_sessions[0].attached, Some(true));
-        assert_eq!(report.mux_sessions[1].attached, Some(false));
+        assert_eq!(report.mux_sessions.len(), 3);
+        assert_eq!(report.mux_sessions[0].attached, Some(true), "(current)");
+        assert_eq!(
+            report.mux_sessions[1].attached, None,
+            "running, but zellij does not say whether a client is attached"
+        );
+        assert_eq!(report.mux_sessions[2].attached, Some(false), "EXITED");
     }
 
     #[test]

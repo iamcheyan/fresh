@@ -222,15 +222,25 @@ pub fn scan(env: &Env) -> ToolReport {
 /// `/tmp`. The directory is mode 0700, so on a shared machine we see only our
 /// own — which is the correct scope for this crate anyway.
 fn socket_paths(env: &Env, report: &mut ToolReport) -> Vec<PathBuf> {
-    let tmpdir = env
-        .var("TMUX_TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    if env.var("TMUX_TMPDIR").is_some() {
-        report
-            .evidence
-            .push(Evidence::env_var("TMUX_TMPDIR", tmpdir.to_string_lossy()));
-    }
+    // Absolute only, as every other override in this crate is: a relative
+    // value would resolve against the scanning process's cwd and point the
+    // socket search at a directory unrelated to the user's tmux.
+    let tmpdir = match env.var("TMUX_TMPDIR").map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => {
+            report
+                .evidence
+                .push(Evidence::env_var("TMUX_TMPDIR", dir.to_string_lossy()));
+            dir
+        }
+        Some(dir) => {
+            report.note_problem(format!(
+                "TMUX_TMPDIR is set to a relative path ({}); ignoring it and reading /tmp",
+                dir.display()
+            ));
+            PathBuf::from("/tmp")
+        }
+        None => PathBuf::from("/tmp"),
+    };
     let dir = tmpdir.join(format!("tmux-{}", env.uid()));
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();

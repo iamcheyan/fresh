@@ -505,26 +505,81 @@ pub fn scan_store(
     env: &Env,
     limit: usize,
     problems: &mut Vec<String>,
-) -> (Vec<AgentSession>, Vec<Evidence>) {
+) -> StoreScan {
     let (root, moved_by) = store.root(env);
     let mut evidence = Vec::new();
     if let Some(moved) = moved_by {
+        // Recorded whether or not the directory exists: "you pointed this
+        // variable somewhere" is true either way, and is exactly what someone
+        // debugging an empty scan needs to see. It is *not* evidence the agent
+        // is installed — `root_exists` below is what says that.
         evidence.push(moved);
     }
     if !root.is_dir() {
-        return (Vec::new(), evidence);
+        return StoreScan {
+            root_exists: false,
+            sessions: Vec::new(),
+            evidence,
+        };
     }
     evidence.push(Evidence::dir(&root).saying(format!("{} session store", store.display_name)));
 
+    // One past the limit, so a truncated walk is distinguishable from one that
+    // happened to land exactly on it.
     let mut files = Vec::new();
-    collect_files(&root, &root, store, 0, limit, &mut files, problems);
+    collect_files(&root, &root, store, 0, limit + 1, &mut files, problems);
     files.sort();
+    let truncated = files.len() > limit;
+    files.truncate(limit);
+    if truncated {
+        problems.push(format!(
+            "{}: stopped at the {limit}-session limit; the rows reported are the first {limit} \
+             in path order, not the {limit} most recently used",
+            store.display_name
+        ));
+    }
+
+    if store.layout == Layout::Opaque {
+        // The store is discoverable but its format is not parsed (opencode's
+        // SQLite, Aider's per-repo history). Emitting a row per file would
+        // invent sessions we cannot actually identify, so report the files as
+        // evidence and leave the session list empty — which is what this
+        // crate's docs have always claimed happens.
+        for path in &files {
+            evidence.push(Evidence::file(path).saying(format!(
+                "{} state; format not parsed, so no sessions are reported from it",
+                store.display_name
+            )));
+        }
+        return StoreScan {
+            root_exists: true,
+            sessions: Vec::new(),
+            evidence,
+        };
+    }
 
     let sessions = files
         .into_iter()
         .map(|path| session_from_transcript(store, &root, path))
         .collect();
-    (sessions, evidence)
+    StoreScan {
+        root_exists: true,
+        sessions,
+        evidence,
+    }
+}
+
+/// What one store's walk found.
+///
+/// `root_exists` is separate from `evidence` on purpose: an environment
+/// variable pointing at a directory that is not there is worth reporting, but
+/// it is not grounds for calling the agent installed.
+#[derive(Debug)]
+pub struct StoreScan {
+    /// Whether the store's root directory is actually present.
+    pub root_exists: bool,
+    pub sessions: Vec<AgentSession>,
+    pub evidence: Vec<Evidence>,
 }
 
 fn collect_files(
@@ -610,6 +665,7 @@ fn session_from_transcript(store: &AgentStore, root: &Path, path: PathBuf) -> Ag
         modified_unix: modified_unix(&path),
         agent_version: None,
         is_subagent: false,
+        parent_session_id: None,
         confidence,
         evidence: vec![Evidence::file(&path).saying(format!(
             "{} transcript under {}",
