@@ -147,6 +147,7 @@ impl Target for LocalTarget {
                 .unwrap_or_default(),
             kind: kind_of(&meta.file_type()),
             modified_unix: modified(&meta).unwrap_or(0),
+            size: meta.len(),
             path: path.to_path_buf(),
         })
     }
@@ -207,17 +208,15 @@ fn walk_dir(
         let name = child.file_name().to_string_lossy().into_owned();
         let path = child.path();
         let kind = kind_of(&file_type);
+        // One metadata call, used for both fields: free here, because the
+        // directory read already holds it.
+        let meta = child.metadata().ok();
         out.push(Entry {
             path: path.clone(),
             name: name.clone(),
             kind,
-            // Free: the directory read already holds it.
-            modified_unix: child
-                .metadata()
-                .ok()
-                .as_ref()
-                .and_then(modified)
-                .unwrap_or(0),
+            modified_unix: meta.as_ref().and_then(modified).unwrap_or(0),
+            size: meta.as_ref().map_or(0, std::fs::Metadata::len),
         });
         // Symlinks are listed but never descended: one pointing back up the
         // tree would make this walk unbounded.

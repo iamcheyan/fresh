@@ -9476,17 +9476,24 @@ function handleDiscoverEvent(e: WidgetEvt): void {
     closeDiscoverDialog();
     return;
   }
-  if (e.event_type === "select" && e.widget_key === "discover-machine") {
-    st.machineIndex = e.index ?? 0;
-    // A different machine invalidates the rows on screen: showing one
-    // machine's sessions under another's name is worse than showing none.
-    st.rows = null;
-    st.note = "";
-    refreshDiscoverDialog();
+  // A dropdown reports `change` with the index in `payload`, not `select`.
+  // Reading the wrong one left machineIndex at 0 while the control showed
+  // another machine, so a scan reported Local's sessions under a remote
+  // machine's name — the exact mislabelling the guard below exists to stop.
+  if (e.event_type === "change" && e.widget_key === "discover-machine") {
+    const idx = ((e.payload ?? {}) as Record<string, unknown>).index;
+    if (typeof idx === "number" && idx !== st.machineIndex) {
+      st.machineIndex = idx;
+      // A different machine invalidates the rows on screen.
+      st.rows = null;
+      st.note = "";
+      refreshDiscoverDialog();
+    }
     return;
   }
-  if (e.event_type === "select" && e.widget_key === "discover-rows") {
-    st.index = e.index ?? 0;
+  if (e.event_type === "change" && e.widget_key === "discover-rows") {
+    const idx = ((e.payload ?? {}) as Record<string, unknown>).index;
+    if (typeof idx === "number") st.index = idx;
     return;
   }
   if (e.event_type === "activate") {

@@ -161,6 +161,7 @@ impl Target for AuthorityTarget {
                     .modified
                     .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                     .map_or(0, |d| d.as_secs()),
+                size: entry.metadata.size,
             });
             out.len() < opts.max_entries
         })?;
@@ -190,11 +191,12 @@ impl Target for AuthorityTarget {
             meta.modified
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_secs()),
+            meta.size,
         ))
     }
 }
 
-fn entry_at(path: &Path, kind: EntryKind, modified_unix: u64) -> Entry {
+fn entry_at(path: &Path, kind: EntryKind, modified_unix: u64, size: u64) -> Entry {
     Entry {
         name: path
             .file_name()
@@ -202,6 +204,7 @@ fn entry_at(path: &Path, kind: EntryKind, modified_unix: u64) -> Entry {
             .unwrap_or_default(),
         kind,
         modified_unix,
+        size,
         path: path.to_path_buf(),
     }
 }

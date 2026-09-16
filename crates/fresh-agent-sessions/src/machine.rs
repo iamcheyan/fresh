@@ -218,7 +218,18 @@ impl<'a> Machine<'a> {
         if self.cancelled() {
             return None;
         }
-        self.target.read_prefix(path, max_bytes).ok()
+        // Never ask for more bytes than the file holds. A ranged read is
+        // reasonably implemented with `read_exact`, which fails outright when
+        // the file is shorter than the request — and a transcript with a few
+        // records is far shorter than the header budget, so asking blind loses
+        // exactly the small sessions. The size came from the walk, so clamping
+        // costs nothing.
+        let wanted = match self.stat(path) {
+            Some(entry) if entry.size > 0 => max_bytes.min(entry.size as usize),
+            Some(_) => return Some(Vec::new()),
+            None => max_bytes,
+        };
+        self.target.read_prefix(path, wanted).ok()
     }
 
     /// Read many prefixes in one call, in the order requested.

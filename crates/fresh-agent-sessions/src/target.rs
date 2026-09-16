@@ -104,6 +104,14 @@ pub struct Entry {
     /// determine one supplies `0`, which sorts oldest — the walk itself must
     /// never become N stats to populate this.
     pub modified_unix: u64,
+    /// Size in bytes, from the same walk.
+    ///
+    /// Carried for the same reason as the mtime, and used for a specific
+    /// thing: a bounded read must not ask for more bytes than the file has.
+    /// Some transports implement a ranged read with `read_exact`, which fails
+    /// outright on a short file — and a transcript with a few records is far
+    /// shorter than the header budget.
+    pub size: u64,
 }
 
 impl Entry {
@@ -328,6 +336,7 @@ impl MapTarget {
                 .unwrap_or_default(),
             kind,
             modified_unix: 1_700_000_000,
+            size: self.files.get(path).map_or(0, |body| body.len() as u64),
             path: path.to_path_buf(),
         }
     }
