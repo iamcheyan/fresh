@@ -1,0 +1,30 @@
+[package]
+name = "fresh-agent-sessions"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Read-only discovery of agent sessions, workspaces and worktrees managed by third-party tools: terminal multiplexers (tmux, screen, zellij), agent orchestrators (Orca, Herdr, Superset, super.engineering) and coding-agent CLIs (Claude Code, Codex, Cursor, Gemini, and ~20 more)"
+keywords = ["agent", "session", "tmux", "worktree", "discovery"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "fresh_agent_sessions"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fresh-agent-sessions"
+path = "src/bin/fresh_agent_sessions.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3.25"
+
+[lints]
+workspace = true
