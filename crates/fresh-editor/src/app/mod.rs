@@ -471,6 +471,17 @@ pub struct PerfCounters {
 
 /// The main editor struct - manages multiple buffers, clipboard, and rendering
 pub struct Editor {
+    /// Machines a plugin opened with `openMachine`, by handle id.
+    ///
+    /// The editor's own "where" is a window's authority; these are authorities
+    /// with no window, so a plugin can read a machine nobody is looking at.
+    /// Held until the plugin closes the handle, so a scan that walks and then
+    /// reads connects once rather than per call.
+    pub(crate) open_machines:
+        std::collections::HashMap<u64, Arc<crate::services::authority::Authority>>,
+    /// Source of `open_machines` keys. Starts at 1, so 0 is free to mean
+    /// "no machine — use the active window's authority" on the wire.
+    pub(crate) next_machine_id: u64,
     /// See [`PerfCounters`]. Cheap to maintain (two increments on a path
     /// that is already copying), and the only way an assertion can tell a
     /// per-tick copy from a per-change one.

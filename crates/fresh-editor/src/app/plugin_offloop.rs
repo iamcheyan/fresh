@@ -119,6 +119,189 @@ pub(crate) fn discover_agent_sessions(
     });
 }
 
+/// One `walkTree` request: a bounded, bulk listing of a subtree.
+pub(crate) struct WalkTreeRequest {
+    pub root: PathBuf,
+    pub skip_dirs: Vec<String>,
+    pub include_hidden: bool,
+    pub include_dirs: bool,
+    pub max_depth: usize,
+    pub max_entries: usize,
+    pub callback_id: JsCallbackId,
+}
+
+/// Walk a subtree in one call and hand the entries back as JSON.
+///
+/// The bulk shape is the point: a remote filesystem walks server-side and
+/// streams batches, so a plugin scanning a directory tree costs one request
+/// rather than one per directory. Every entry carries the kind, mtime and size
+/// the walk already stat'd, so a caller sorting by age needs no second pass.
+///
+/// `spawn_blocking`, not `spawn`: `FileSystem` is synchronous and a remote one
+/// blocks on its transport, so a reactor thread would stall every other task
+/// on that worker.
+pub(crate) fn walk_tree(runtime: &LiveRuntime, cap: OffLoop, req: WalkTreeRequest) {
+    runtime.spawn_blocking(move || {
+        let WalkTreeRequest {
+            root,
+            skip_dirs,
+            include_hidden,
+            include_dirs,
+            max_depth,
+            max_entries,
+            callback_id,
+        } = req;
+
+        let skip: Vec<&str> = skip_dirs.iter().map(String::as_str).collect();
+        // One over the cap, so "we stopped early" is observed rather than
+        // inferred from a count that happens to equal the limit.
+        let probe = max_entries.saturating_add(1);
+        let opts = crate::model::filesystem::WalkOptions {
+            skip_dirs: &skip,
+            include_hidden,
+            include_dirs,
+            max_depth,
+            max_entries: probe,
+        };
+
+        let cancel = AtomicBool::new(false);
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        let walked = cap.filesystem.walk(&root, &opts, &cancel, &mut |entry| {
+            entries.push(serde_json::json!({
+                "path": entry.path.to_string_lossy(),
+                "rel": entry.rel,
+                "kind": match entry.entry_type {
+                    crate::model::filesystem::EntryType::Directory => "dir",
+                    crate::model::filesystem::EntryType::Symlink => "symlink",
+                    crate::model::filesystem::EntryType::File => "file",
+                },
+                "mtime": entry
+                    .metadata
+                    .modified
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs()),
+                "size": entry.metadata.size,
+            }));
+            true
+        });
+
+        let result = match walked {
+            Ok(()) => {
+                let truncated = entries.len() > max_entries;
+                entries.truncate(max_entries);
+                serde_json::to_string(&serde_json::json!({
+                    "entries": entries,
+                    "truncated": truncated,
+                }))
+                .map_err(|err| format!("could not serialise walk: {err}"))
+            }
+            Err(err) => Err(format!("{}: {err}", root.display())),
+        };
+        cap.settle(callback_id, result);
+    });
+}
+
+/// One `readFilePrefixes` request: many bounded reads in a single call.
+pub(crate) struct ReadPrefixesRequest {
+    /// `(path, max_bytes)` pairs.
+    pub requests: Vec<(PathBuf, usize)>,
+    pub callback_id: JsCallbackId,
+}
+
+/// Read the first `max_bytes` of each path, batched into one call.
+///
+/// Batched because the alternative is a round trip per file: identifying a
+/// session transcript needs only its first records, and a scan looks at
+/// hundreds of them. A per-file failure is reported per file rather than
+/// failing the batch — one unreadable transcript must not lose the rest.
+pub(crate) fn read_file_prefixes(runtime: &LiveRuntime, cap: OffLoop, req: ReadPrefixesRequest) {
+    runtime.spawn_blocking(move || {
+        let ReadPrefixesRequest {
+            requests,
+            callback_id,
+        } = req;
+
+        let results: Vec<serde_json::Value> = requests
+            .into_iter()
+            .map(|(path, max_bytes)| {
+                // Never ask for more than the file holds: a ranged read is
+                // reasonably implemented with `read_exact`, which fails
+                // outright on a file shorter than the request — and a
+                // transcript with a few records is far shorter than the
+                // budget a caller passes.
+                let wanted = cap
+                    .filesystem
+                    .metadata(&path)
+                    .map(|meta| max_bytes.min(meta.size as usize))
+                    .unwrap_or(max_bytes);
+                let read = if wanted == 0 {
+                    Ok(Vec::new())
+                } else {
+                    cap.filesystem.read_range(&path, 0, wanted)
+                };
+                match read {
+                    Ok(bytes) => serde_json::json!({
+                        "path": path.to_string_lossy(),
+                        "text": String::from_utf8_lossy(&bytes),
+                    }),
+                    Err(err) => serde_json::json!({
+                        "path": path.to_string_lossy(),
+                        "error": err.to_string(),
+                    }),
+                }
+            })
+            .collect();
+
+        cap.settle(
+            callback_id,
+            serde_json::to_string(&results)
+                .map_err(|err| format!("could not serialise reads: {err}")),
+        );
+    });
+}
+
+/// One `runOnTarget` request.
+pub(crate) struct RunOnTargetRequest {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub spawner: Arc<dyn crate::services::remote::ProcessSpawner>,
+    pub callback_id: JsCallbackId,
+}
+
+/// Run a command on the machine the editor is acting on.
+///
+/// Distinct from `spawnHostProcess`, which always runs here: this goes through
+/// the authority's spawner, so over a remote authority it runs *there*. That
+/// is what makes a scanner able to ask `tmux list-sessions` about the machine
+/// whose files it is reading, rather than about the laptop displaying them.
+///
+/// A non-zero exit is data, not an error: a tool that is not installed exits
+/// non-zero, and the caller wants to see that rather than have the promise
+/// reject.
+pub(crate) fn run_on_target(runtime: &LiveRuntime, cap: OffLoop, req: RunOnTargetRequest) {
+    runtime.spawn(async move {
+        let RunOnTargetRequest {
+            program,
+            args,
+            cwd,
+            spawner,
+            callback_id,
+        } = req;
+
+        let result = match spawner.spawn(program.clone(), args, cwd).await {
+            Ok(out) => serde_json::to_string(&serde_json::json!({
+                "code": out.exit_code,
+                "stdout": out.stdout,
+                "stderr": out.stderr,
+            }))
+            .map_err(|err| format!("could not serialise command result: {err}")),
+            Err(err) => Err(format!("{program}: {err}")),
+        };
+        cap.settle(callback_id, result);
+    });
+}
+
 /// Editor-thread-collected inputs for a project grep. Everything here is a
 /// snapshot: the piece tree is not `Send`, so dirty buffers are captured as
 /// `HybridSearchPlan`s while still on the editor thread.

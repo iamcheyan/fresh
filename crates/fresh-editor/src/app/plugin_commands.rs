@@ -3391,6 +3391,253 @@ impl Editor {
         }
     }
 
+    /// The runtime and return path every off-loop handler needs, or `None`
+    /// once the callback has been rejected for their absence.
+    fn off_loop_parts(
+        &self,
+        callback_id: fresh_core::api::JsCallbackId,
+    ) -> Option<(
+        crate::services::runtime::LiveRuntime,
+        std::sync::mpsc::Sender<crate::services::async_bridge::AsyncMessage>,
+    )> {
+        let Some(runtime) = self.tokio_runtime.clone() else {
+            self.plugin_manager
+                .read()
+                .unwrap()
+                .reject_callback(callback_id, "No tokio runtime available".to_string());
+            return None;
+        };
+        let Some(sender) = self.async_bridge.as_ref().map(|b| b.sender()) else {
+            self.plugin_manager
+                .read()
+                .unwrap()
+                .reject_callback(callback_id, "No async bridge available".to_string());
+            return None;
+        };
+        Some((runtime, sender))
+    }
+
+    /// Open a machine without attaching it to a window.
+    ///
+    /// The payload is the one `setAuthority` takes, built through the same
+    /// `from_plugin_payload` path — "headless" means only that the authority
+    /// is kept here instead of installed into a window, so there is no second
+    /// way to construct a backend.
+    pub(super) fn handle_open_machine(
+        &mut self,
+        payload: serde_json::Value,
+        callback_id: fresh_core::api::JsCallbackId,
+    ) {
+        let parsed =
+            match serde_json::from_value::<crate::services::authority::AuthorityPayload>(payload) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    self.plugin_manager
+                        .read()
+                        .unwrap()
+                        .reject_callback(callback_id, format!("openMachine: {err}"));
+                    return;
+                }
+            };
+        // The opened machine shares the editor's live trust and env handles,
+        // so its spawners are gated exactly as the active window's are.
+        let trust = Arc::clone(&self.authority().workspace_trust);
+        let env = Arc::clone(&self.authority().env_provider);
+        let authority =
+            match crate::services::authority::Authority::from_plugin_payload(parsed, trust, env) {
+                Ok(authority) => authority,
+                Err(err) => {
+                    self.plugin_manager
+                        .read()
+                        .unwrap()
+                        .reject_callback(callback_id, format!("openMachine: {err}"));
+                    return;
+                }
+            };
+
+        let platform = match crate::services::agent_sessions::platform_of(&authority) {
+            fresh_agent_sessions::Platform::MacOs => "macos",
+            fresh_agent_sessions::Platform::Windows => "windows",
+            fresh_agent_sessions::Platform::Linux => "linux",
+            fresh_agent_sessions::Platform::Other => "other",
+        };
+        let home = authority
+            .filesystem
+            .home_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let label = authority.display_label.clone();
+
+        let id = self.next_machine_id;
+        self.next_machine_id += 1;
+        self.open_machines.insert(id, Arc::new(authority));
+
+        let payload = serde_json::json!({
+            "id": id,
+            "platform": platform,
+            "home": home,
+            "label": label,
+        });
+        self.plugin_manager
+            .read()
+            .unwrap()
+            .resolve_callback(callback_id, payload.to_string());
+    }
+
+    /// Drop a machine opened by `openMachine`.
+    ///
+    /// Closing an id that is already gone resolves rather than rejecting, so a
+    /// plugin's cleanup path never has to track whether it already ran.
+    pub(super) fn handle_close_machine(
+        &mut self,
+        machine: u64,
+        callback_id: fresh_core::api::JsCallbackId,
+    ) {
+        let was_open = self.open_machines.remove(&machine).is_some();
+        self.plugin_manager
+            .read()
+            .unwrap()
+            .resolve_callback(callback_id, was_open.to_string());
+    }
+
+    /// The filesystem for `machine`, or the active window's when `None`.
+    ///
+    /// Returns `None` once the callback has been rejected for an unknown
+    /// handle — a closed or never-opened machine is an error the plugin sees,
+    /// not a silent fall back to this machine, which would read the wrong
+    /// computer and label the answer with the right one's name.
+    fn filesystem_for(
+        &self,
+        machine: Option<u64>,
+        callback_id: fresh_core::api::JsCallbackId,
+    ) -> Option<Arc<dyn crate::model::filesystem::FileSystem + Send + Sync>> {
+        match machine {
+            None => Some(self.authority().filesystem.clone()),
+            Some(id) => match self.open_machines.get(&id) {
+                Some(auth) => Some(auth.filesystem.clone()),
+                None => {
+                    self.plugin_manager
+                        .read()
+                        .unwrap()
+                        .reject_callback(callback_id, format!("machine {id} is not open"));
+                    None
+                }
+            },
+        }
+    }
+
+    /// Hand a subtree walk to the off-loop worker.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn handle_walk_tree(
+        &mut self,
+        machine: Option<u64>,
+        root: String,
+        skip_dirs: Vec<String>,
+        include_hidden: bool,
+        include_dirs: bool,
+        max_depth: usize,
+        max_entries: usize,
+        callback_id: fresh_core::api::JsCallbackId,
+    ) {
+        let Some((runtime, sender)) = self.off_loop_parts(callback_id) else {
+            return;
+        };
+        let Some(filesystem) = self.filesystem_for(machine, callback_id) else {
+            return;
+        };
+        super::plugin_offloop::walk_tree(
+            &runtime,
+            super::plugin_offloop::OffLoop { filesystem, sender },
+            super::plugin_offloop::WalkTreeRequest {
+                root: std::path::PathBuf::from(root),
+                skip_dirs,
+                include_hidden,
+                include_dirs,
+                // 0 would mean "walk nothing", which no caller wants and which
+                // silently returns an empty list; read it as "no limit".
+                max_depth: if max_depth == 0 {
+                    usize::MAX
+                } else {
+                    max_depth
+                },
+                max_entries: if max_entries == 0 {
+                    usize::MAX
+                } else {
+                    max_entries
+                },
+                callback_id,
+            },
+        );
+    }
+
+    /// Hand a batch of bounded reads to the off-loop worker.
+    pub(super) fn handle_read_file_prefixes(
+        &mut self,
+        machine: Option<u64>,
+        requests: Vec<(String, usize)>,
+        callback_id: fresh_core::api::JsCallbackId,
+    ) {
+        let Some((runtime, sender)) = self.off_loop_parts(callback_id) else {
+            return;
+        };
+        let Some(filesystem) = self.filesystem_for(machine, callback_id) else {
+            return;
+        };
+        super::plugin_offloop::read_file_prefixes(
+            &runtime,
+            super::plugin_offloop::OffLoop { filesystem, sender },
+            super::plugin_offloop::ReadPrefixesRequest {
+                requests: requests
+                    .into_iter()
+                    .map(|(path, max_bytes)| (std::path::PathBuf::from(path), max_bytes))
+                    .collect(),
+                callback_id,
+            },
+        );
+    }
+
+    /// Hand a command on the authority's machine to the off-loop worker.
+    pub(super) fn handle_run_on_target(
+        &mut self,
+        machine: Option<u64>,
+        program: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+        callback_id: fresh_core::api::JsCallbackId,
+    ) {
+        let Some((runtime, sender)) = self.off_loop_parts(callback_id) else {
+            return;
+        };
+        let authority = match machine {
+            None => self.authority(),
+            Some(id) => match self.open_machines.get(&id) {
+                Some(auth) => auth.as_ref(),
+                None => {
+                    self.plugin_manager
+                        .read()
+                        .unwrap()
+                        .reject_callback(callback_id, format!("machine {id} is not open"));
+                    return;
+                }
+            },
+        };
+        super::plugin_offloop::run_on_target(
+            &runtime,
+            super::plugin_offloop::OffLoop {
+                filesystem: authority.filesystem.clone(),
+                sender,
+            },
+            super::plugin_offloop::RunOnTargetRequest {
+                program,
+                args,
+                cwd,
+                spawner: authority.process_spawner.clone(),
+                callback_id,
+            },
+        );
+    }
+
     /// Hand a session scan to the off-loop worker.
     ///
     /// The editor-thread half is deliberately trivial: name the machine, note

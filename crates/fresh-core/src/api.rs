@@ -5633,6 +5633,93 @@ pub enum PluginCommand {
     /// automatically when their buffer closes.
     ReleaseDiffBaseline { baseline_id: u64 },
 
+    /// Open a connection to a machine without attaching it to a window.
+    ///
+    /// The editor's own "where" is a window's authority; this builds one
+    /// headlessly from the same payload `setAuthority` takes, so a plugin can
+    /// read a machine it is not looking at. The caller supplies the spec —
+    /// core keeps no registry of machines, because which machines exist is a
+    /// plugin's business (the orchestrator keeps them in `machines.json`).
+    ///
+    /// Resolves with `{id, platform, home, label}`. The connection stays open
+    /// until `closeMachine`, so a scan that walks and then reads does not pay
+    /// to connect twice.
+    OpenMachine {
+        /// The same shape `setAuthority` accepts.
+        #[ts(type = "unknown")]
+        payload: JsonValue,
+        callback_id: JsCallbackId,
+    },
+
+    /// Drop a machine opened by `openMachine`.
+    ///
+    /// Idempotent: closing an id that is already gone is not an error, so a
+    /// plugin's cleanup path never has to track whether it already ran.
+    CloseMachine {
+        machine: u64,
+        callback_id: JsCallbackId,
+    },
+
+    /// Walk a subtree on the machine the editor is acting on, in one call.
+    ///
+    /// Runs off the editor thread. Bulk by design: a remote authority walks
+    /// server-side, so a plugin listing a directory tree costs one request
+    /// rather than one per directory, and every entry arrives carrying the
+    /// kind, mtime and size the walk already stat'd.
+    WalkTree {
+        /// Which open machine to act on, from `openMachine`.
+        /// `None` means the active window's own authority.
+        machine: Option<u64>,
+        /// Directory to walk. A path that is not there is an empty walk, not
+        /// an error — a store for a tool that is not installed is simply
+        /// absent.
+        root: String,
+        /// Directory basenames skipped at every depth.
+        skip_dirs: Vec<String>,
+        /// Report dot-prefixed entries. Off by default, but a plugin reading
+        /// tool state out of `~/.config` needs it on and gets nothing without.
+        include_hidden: bool,
+        /// Report directories as well as files.
+        include_dirs: bool,
+        /// Maximum depth below `root`; depth 1 is a direct child.
+        max_depth: usize,
+        /// Stop after this many entries, reporting the walk as truncated.
+        max_entries: usize,
+        callback_id: JsCallbackId,
+    },
+
+    /// Read the first bytes of many files in one call.
+    ///
+    /// Batched on purpose: identifying a file by its header needs only its
+    /// first records, and a caller doing this over a remote authority would
+    /// otherwise pay a round trip per file. A failure is reported per path,
+    /// so one unreadable file does not lose the rest.
+    ReadFilePrefixes {
+        /// Which open machine to act on, from `openMachine`.
+        /// `None` means the active window's own authority.
+        machine: Option<u64>,
+        /// `(path, max_bytes)` pairs.
+        requests: Vec<(String, usize)>,
+        callback_id: JsCallbackId,
+    },
+
+    /// Run a command on the machine the editor is acting on.
+    ///
+    /// Unlike `spawnHostProcess`, which always runs here, this goes through
+    /// the authority's spawner: over a remote authority it runs *there*. A
+    /// non-zero exit resolves with that code rather than rejecting — a tool
+    /// that is not installed is an answer, not a failure.
+    RunOnTarget {
+        /// Which open machine to act on, from `openMachine`.
+        /// `None` means the active window's own authority.
+        machine: Option<u64>,
+        program: String,
+        args: Vec<String>,
+        /// Working directory for the command, if it matters.
+        cwd: Option<String>,
+        callback_id: JsCallbackId,
+    },
+
     /// Discover agent sessions that other tools are running on this
     /// session's machine.
     ///
