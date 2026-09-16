@@ -45,7 +45,7 @@ use std::sync::Arc;
 use fresh_agent_sessions::{
     collect_sessions, Entry, EntryKind, Platform, ScanResult, Target, WalkOpts,
 };
-use fresh_editor_core::model::filesystem::{EntryType, FileSystem};
+use fresh_editor_core::model::filesystem::{EntryType, FileSystem, WalkOptions as FsWalkOptions};
 
 use crate::services::authority::{Authority, SessionAuthoritySpec};
 
@@ -127,21 +127,43 @@ impl Target for AuthorityTarget {
         opts: &WalkOpts,
         cancel: &AtomicBool,
     ) -> std::io::Result<Vec<Entry>> {
-        // `FileSystem::walk_files` is the bulk primitive, and a remote
-        // implementation runs it server-side — but it skips every entry whose
-        // name starts with `.`, because it exists for project file search.
-        // Every store this scans is a dotfile directory (`~/.claude`,
-        // `~/.codex`, `~/.config/herdr`), so using it here returns nothing at
-        // all.
-        //
-        // So this walks with `read_dir`, which is correct but costs one round
-        // trip per directory. That is tolerable only because these trees are
-        // deliberately shallow — `WalkOpts::max_depth` is 1 to 4 — and it is
-        // the one thing in this integration that should not stay as it is.
-        // The fix is a bulk walk that can be told to include hidden entries;
-        // see the module docs.
+        // One bulk call for the whole subtree. A remote filesystem runs this
+        // server-side and streams batches back, so a store costs one request
+        // rather than one per directory, and every entry arrives carrying the
+        // metadata the walk already stat'd — no follow-up round trips for the
+        // mtimes the scan sorts on.
+        let skip: Vec<&str> = opts.skip_dirs.iter().map(String::as_str).collect();
+        let fs_opts = FsWalkOptions {
+            skip_dirs: &skip,
+            // Every store this scans is a dotfile directory: `~/.claude`,
+            // `~/.codex`, `~/.config/herdr`. Without this the walk returns
+            // nothing at all.
+            include_hidden: true,
+            // Providers ask "is this a directory?" about paths they found, so
+            // the walk must report directories, not only the files in them.
+            include_dirs: true,
+            max_depth: opts.max_depth,
+            max_entries: opts.max_entries,
+        };
+
         let mut out = Vec::new();
-        self.walk_dir(root, root, opts, cancel, 1, &mut out)?;
+        self.filesystem.walk(root, &fs_opts, cancel, &mut |entry| {
+            out.push(Entry {
+                path: entry.path.to_path_buf(),
+                name: entry
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                kind: kind_of(entry.entry_type),
+                modified_unix: entry
+                    .metadata
+                    .modified
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs()),
+            });
+            out.len() < opts.max_entries
+        })?;
         Ok(out)
     }
 
@@ -181,73 +203,6 @@ fn entry_at(path: &Path, kind: EntryKind, modified_unix: u64) -> Entry {
         kind,
         modified_unix,
         path: path.to_path_buf(),
-    }
-}
-
-impl AuthorityTarget {
-    fn walk_dir(
-        &self,
-        root: &Path,
-        dir: &Path,
-        opts: &WalkOpts,
-        cancel: &AtomicBool,
-        depth: usize,
-        out: &mut Vec<Entry>,
-    ) -> std::io::Result<()> {
-        use std::sync::atomic::Ordering;
-
-        if depth > opts.max_depth || out.len() >= opts.max_entries {
-            return Ok(());
-        }
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-        let entries = match self.filesystem.read_dir(dir) {
-            Ok(entries) => entries,
-            // A missing root means "not installed"; an unreadable subdirectory
-            // is not worth failing the whole walk over.
-            Err(err) if dir == root => return Err(err),
-            Err(_) => return Ok(()),
-        };
-
-        for entry in entries {
-            if out.len() >= opts.max_entries {
-                return Ok(());
-            }
-            let kind = kind_of(entry.entry_type);
-            let from_listing = entry
-                .metadata
-                .as_ref()
-                .and_then(|meta| meta.modified)
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_secs());
-            // `read_dir` fills metadata lazily, so fall back to a stat for the
-            // files whose mtime the scan actually sorts on.
-            let modified_unix = if from_listing == 0 && kind == EntryKind::File {
-                self.filesystem
-                    .metadata(&entry.path)
-                    .ok()
-                    .and_then(|meta| meta.modified)
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_secs())
-            } else {
-                from_listing
-            };
-
-            let path = entry.path.clone();
-            let name = entry.name.clone();
-            out.push(Entry {
-                path: path.clone(),
-                name: name.clone(),
-                kind,
-                modified_unix,
-            });
-            // Symlinks are listed but never descended.
-            if kind == EntryKind::Dir && !opts.skip_dirs.iter().any(|skip| *skip == name) {
-                self.walk_dir(root, &path, opts, cancel, depth + 1, out)?;
-            }
-        }
-        Ok(())
     }
 }
 

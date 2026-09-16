@@ -562,6 +562,89 @@ def cmd_cancel(id, p):
     send(id, r={})
 
 
+def cmd_walk_entries(id, p):
+    """Recursively walk a directory, streaming entries in batches.
+
+    The general form of cmd_walk_files: honours include_hidden, include_dirs
+    and max_depth, and carries each entry's kind and mtime.
+
+    Carrying the metadata is the point. scandir has already stat'd every entry
+    to classify it, so putting mtime in this response costs a few bytes, while
+    the client asking afterwards costs a network round trip per file.
+    """
+    root = validate_path(p["path"])
+    skip_dirs = set(p.get("skip_dirs", []))
+    include_hidden = bool(p.get("include_hidden", False))
+    include_dirs = bool(p.get("include_dirs", False))
+    max_depth = p.get("max_depth")
+    if max_depth is None:
+        max_depth = 1 << 62
+    max_files = p.get("max_files", 50000)
+    batch_size = 500
+
+    count = 0
+    batch = []
+    # (dir, depth); depth 1 is a direct child of root.
+    stack = [(root, 1)]
+
+    while stack:
+        if id in cancelled:
+            send(id, r={"count": count, "cancelled": True})
+            return
+
+        d, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        try:
+            entries = os.scandir(d)
+        except OSError:
+            continue
+
+        for entry in entries:
+            if id in cancelled:
+                send(id, r={"count": count, "cancelled": True})
+                return
+
+            if not include_hidden and entry.name.startswith("."):
+                continue
+
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+                is_link = entry.is_symlink()
+                kind = "dir" if is_dir else ("symlink" if is_link else "file")
+
+                if not is_dir or include_dirs:
+                    try:
+                        st = entry.stat(follow_symlinks=False)
+                        mtime, size = st.st_mtime, st.st_size
+                    except OSError:
+                        mtime, size = 0, 0
+                    batch.append({
+                        "rel": os.path.relpath(entry.path, root),
+                        "kind": kind,
+                        "mtime": mtime,
+                        "size": size,
+                    })
+                    count += 1
+                    if len(batch) >= batch_size:
+                        send(id, d={"entries": batch})
+                        batch = []
+                    if count >= max_files:
+                        if batch:
+                            send(id, d={"entries": batch})
+                        send(id, r={"count": count, "truncated": True})
+                        return
+
+                if is_dir and entry.name not in skip_dirs:
+                    stack.append((entry.path, depth + 1))
+            except OSError:
+                continue
+
+    if batch:
+        send(id, d={"entries": batch})
+    send(id, r={"count": count})
+
+
 def cmd_walk_files(id, p):
     """Recursively walk a directory, streaming file paths in batches.
 
@@ -647,6 +730,7 @@ METHODS = {
     "kill": cmd_kill,
     "cancel": cmd_cancel,
     "walk_files": cmd_walk_files,
+    "walk_entries": cmd_walk_entries,
 }
 
 

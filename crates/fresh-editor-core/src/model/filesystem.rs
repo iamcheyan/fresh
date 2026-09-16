@@ -25,6 +25,61 @@ pub enum EntryType {
     Symlink,
 }
 
+/// What a [`FileSystem::walk`] should yield, and how far it should go.
+///
+/// Defaults match what project file search wants — files only, hidden entries
+/// skipped, no metadata — so `WalkOptions { skip_dirs, ..Default::default() }`
+/// is the old `walk_files` behaviour.
+#[derive(Debug, Clone)]
+pub struct WalkOptions<'a> {
+    /// Directory basenames skipped at every depth.
+    pub skip_dirs: &'a [&'a str],
+    /// Include dot-prefixed entries.
+    ///
+    /// Off by default because the original caller is project file search,
+    /// which does not want `.git` and friends. A consumer reading tool state
+    /// out of `~/.claude` or `~/.config` needs it on, and gets *nothing at
+    /// all* without it.
+    pub include_hidden: bool,
+    /// Yield directories as well as files.
+    pub include_dirs: bool,
+    /// Maximum depth below `root`. Depth 1 is a direct child;
+    /// [`usize::MAX`] walks the whole tree.
+    pub max_depth: usize,
+    /// Stop after this many entries.
+    pub max_entries: usize,
+}
+
+impl Default for WalkOptions<'_> {
+    fn default() -> Self {
+        Self {
+            skip_dirs: &[],
+            include_hidden: false,
+            include_dirs: false,
+            max_depth: usize::MAX,
+            max_entries: 50_000,
+        }
+    }
+}
+
+/// One entry from a [`FileSystem::walk`].
+#[derive(Debug, Clone)]
+pub struct WalkEntry<'a> {
+    /// Absolute path.
+    pub path: &'a Path,
+    /// Path relative to the walk root, `/`-separated on every platform.
+    pub rel: &'a str,
+    pub entry_type: EntryType,
+    /// Always carried.
+    ///
+    /// A walk has to stat every entry to classify it, so the metadata is
+    /// already in hand — returning it costs a few bytes in a response that is
+    /// being sent anyway, while a caller fetching it afterwards pays a network
+    /// round trip *per file*. Making it optional would only create a way to
+    /// get that wrong.
+    pub metadata: FileMetadata,
+}
+
 /// A directory entry returned by `read_dir`
 #[derive(Debug, Clone)]
 pub struct DirEntry {
@@ -751,13 +806,38 @@ pub trait FileSystem: Send + Sync {
     /// collect into a Vec) so memory stays O(tree depth).  Remote
     /// implementations should walk server-side and stream results back
     /// via the channel, avoiding per-directory round-trips.
+    fn walk(
+        &self,
+        root: &Path,
+        opts: &WalkOptions<'_>,
+        cancel: &std::sync::atomic::AtomicBool,
+        on_entry: &mut dyn FnMut(WalkEntry<'_>) -> bool,
+    ) -> io::Result<()>;
+
+    /// Walk `root`, reporting every non-hidden file.
+    ///
+    /// The original, narrower form of [`Self::walk`], kept because most
+    /// callers want exactly this and reads better for it. Implemented in terms
+    /// of `walk`, so a filesystem implements one method, not two.
     fn walk_files(
         &self,
         root: &Path,
         skip_dirs: &[&str],
         cancel: &std::sync::atomic::AtomicBool,
         on_file: &mut dyn FnMut(&Path, &str) -> bool,
-    ) -> io::Result<()>;
+    ) -> io::Result<()> {
+        let opts = WalkOptions {
+            skip_dirs,
+            ..WalkOptions::default()
+        };
+        self.walk(root, &opts, cancel, &mut |entry| {
+            if entry.entry_type == EntryType::File {
+                on_file(entry.path, entry.rel)
+            } else {
+                true
+            }
+        })
+    }
 }
 
 // ============================================================================
@@ -1566,24 +1646,33 @@ impl FileSystem for StdFileSystem {
         default_search_file(self, path, pattern, opts, cursor)
     }
 
-    fn walk_files(
+    fn walk(
         &self,
         root: &Path,
-        skip_dirs: &[&str],
+        opts: &WalkOptions<'_>,
         cancel: &std::sync::atomic::AtomicBool,
-        on_file: &mut dyn FnMut(&Path, &str) -> bool,
+        on_entry: &mut dyn FnMut(WalkEntry<'_>) -> bool,
     ) -> io::Result<()> {
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
+        // (dir, depth) — depth 1 is a direct child of root.
+        let mut stack = vec![(root.to_path_buf(), 1usize)];
+        let mut yielded = 0usize;
+
+        while let Some((dir, depth)) = stack.pop() {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return Ok(());
             }
+            if depth > opts.max_depth {
+                continue;
+            }
 
-            // Use std::fs::read_dir iterator directly — NOT self.read_dir()
-            // which collects into a Vec.  This keeps memory O(1) per directory
-            // even for directories with millions of entries.
+            // `std::fs::read_dir` directly — NOT `self.read_dir()`, which
+            // collects into a Vec. This keeps memory O(1) per directory even
+            // for directories with millions of entries.
             let iter = match std::fs::read_dir(&dir) {
                 Ok(it) => it,
+                // An unreadable root is the caller's problem; an unreadable
+                // subdirectory is not worth abandoning the walk over.
+                Err(err) if dir == root => return Err(err),
                 Err(_) => continue,
             };
 
@@ -1591,33 +1680,56 @@ impl FileSystem for StdFileSystem {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     return Ok(());
                 }
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
+                let Ok(entry) = entry else { continue };
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
 
-                // Skip hidden entries
-                if name_str.starts_with('.') {
+                if !opts.include_hidden && name_str.starts_with('.') {
                     continue;
                 }
-
-                let ft = match entry.file_type() {
-                    Ok(ft) => ft,
-                    Err(_) => continue,
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
                 };
                 let path = entry.path();
+                let entry_type = if file_type.is_dir() {
+                    EntryType::Directory
+                } else if file_type.is_symlink() {
+                    EntryType::Symlink
+                } else {
+                    EntryType::File
+                };
+                let is_dir = entry_type == EntryType::Directory;
 
-                if ft.is_file() {
-                    if let Ok(rel) = path.strip_prefix(root) {
-                        let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        if !on_file(&path, &rel_str) {
-                            return Ok(());
-                        }
+                let report = !is_dir || opts.include_dirs;
+                if report {
+                    let Ok(rel) = path.strip_prefix(root) else {
+                        continue;
+                    };
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    // Locally the entry already holds this, so honouring
+                    // `metadata` costs a `DirEntry::metadata` call rather than
+                    // a fresh `stat`.
+                    // Free here: the directory entry already holds it.
+                    let metadata = entry.metadata().ok().map_or_else(
+                        || FileMetadata::new(0),
+                        |meta| Self::build_metadata(&path, &meta),
+                    );
+                    if !on_entry(WalkEntry {
+                        path: &path,
+                        rel: &rel_str,
+                        entry_type,
+                        metadata,
+                    }) {
+                        return Ok(());
                     }
-                } else if ft.is_dir() && !skip_dirs.contains(&name_str.as_ref()) {
-                    stack.push(path);
+                    yielded += 1;
+                    if yielded >= opts.max_entries {
+                        return Ok(());
+                    }
+                }
+
+                if is_dir && !opts.skip_dirs.contains(&name_str.as_ref()) {
+                    stack.push((path, depth + 1));
                 }
             }
         }
@@ -1755,12 +1867,12 @@ impl FileSystem for NoopFileSystem {
         Self::unsupported()
     }
 
-    fn walk_files(
+    fn walk(
         &self,
         _root: &Path,
-        _skip_dirs: &[&str],
+        _opts: &WalkOptions<'_>,
         _cancel: &std::sync::atomic::AtomicBool,
-        _on_file: &mut dyn FnMut(&Path, &str) -> bool,
+        _on_entry: &mut dyn FnMut(WalkEntry<'_>) -> bool,
     ) -> io::Result<()> {
         Self::unsupported()
     }

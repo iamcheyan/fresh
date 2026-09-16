@@ -679,57 +679,88 @@ impl FileSystem for RemoteFileSystem {
         Ok(())
     }
 
-    fn walk_files(
+    fn walk(
         &self,
         root: &Path,
-        skip_dirs: &[&str],
+        opts: &fresh_editor_core::model::filesystem::WalkOptions<'_>,
         cancel: &std::sync::atomic::AtomicBool,
-        on_file: &mut dyn FnMut(&Path, &str) -> bool,
+        on_entry: &mut dyn FnMut(fresh_editor_core::model::filesystem::WalkEntry<'_>) -> bool,
     ) -> io::Result<()> {
+        use fresh_editor_core::model::filesystem::{EntryType, FileMetadata, WalkEntry};
+
         let path_str = root.to_string_lossy();
         let params = serde_json::json!({
             "path": path_str,
-            "skip_dirs": skip_dirs,
+            "skip_dirs": opts.skip_dirs,
+            "include_hidden": opts.include_hidden,
+            "include_dirs": opts.include_dirs,
+            "max_depth": opts.max_depth,
+            "max_files": opts.max_entries,
         });
 
-        // Server-side walk: the remote agent walks the tree and streams
-        // back batches of relative paths.  We process each batch as it
-        // arrives, keeping memory bounded.
+        // Server-side walk: the agent walks the tree and streams back batches,
+        // so a whole subtree costs one request rather than one per directory,
+        // and each entry carries the metadata the agent already stat'd.
+        //
+        // `walk_entries` rather than extending the older `walk_files`
+        // deliberately: an agent predating these options would ignore
+        // `include_hidden` and stream a silently empty result for a dotfile
+        // tree, whereas an unknown *method* fails loudly and the caller knows.
         let (mut data_rx, result_rx) = self
             .channel
-            .request_streaming_blocking("walk_files", params)
+            .request_streaming_blocking("walk_entries", params)
             .map_err(Self::to_io_error)?;
 
-        // Process streaming batches
         while let Some(data) = data_rx.blocking_recv() {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                // Drop receivers — server sees send fail and stops
+                // Dropping the receivers makes the agent's send fail, which is
+                // how it learns to stop walking.
                 drop(data_rx);
                 drop(result_rx);
                 return Ok(());
             }
 
-            if let Some(files) = data.get("files").and_then(|v| v.as_array()) {
-                for file in files {
-                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        drop(result_rx);
-                        return Ok(());
-                    }
-                    if let Some(rel) = file.as_str() {
-                        let abs = root.join(rel);
-                        if !on_file(&abs, rel) {
-                            // Caller limit reached — drop receivers to signal
-                            // cancellation to the server
-                            drop(result_rx);
-                            return Ok(());
-                        }
-                    }
+            let Some(entries) = data.get("entries").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for entry in entries {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    drop(result_rx);
+                    return Ok(());
+                }
+                let Some(rel) = entry.get("rel").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let abs = root.join(rel);
+                let entry_type = match entry.get("kind").and_then(|v| v.as_str()) {
+                    Some("dir") => EntryType::Directory,
+                    Some("symlink") => EntryType::Symlink,
+                    _ => EntryType::File,
+                };
+                let mut metadata =
+                    FileMetadata::new(entry.get("size").and_then(|v| v.as_u64()).unwrap_or(0));
+                metadata.modified = entry
+                    .get("mtime")
+                    .and_then(|v| v.as_f64())
+                    .and_then(|mtime| {
+                        std::time::UNIX_EPOCH
+                            .checked_add(std::time::Duration::from_secs_f64(mtime.max(0.0)))
+                    });
+
+                if !on_entry(WalkEntry {
+                    path: &abs,
+                    rel,
+                    entry_type,
+                    metadata,
+                }) {
+                    drop(result_rx);
+                    return Ok(());
                 }
             }
         }
 
-        // Drain the final result — channel may already be closed if the
-        // server finished before we read this, which is fine.
+        // Drain the final result — the channel may already be closed if the
+        // agent finished before we read this, which is fine.
         drop(result_rx.blocking_recv());
         Ok(())
     }
