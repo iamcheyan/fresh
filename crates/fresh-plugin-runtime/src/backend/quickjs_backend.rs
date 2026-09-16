@@ -1821,6 +1821,41 @@ impl JsEditorApi {
             .unwrap_or(0) as u32
     }
 
+    /// Discover the agent sessions other tools are running on this machine.
+    ///
+    /// Resolves with `{machine, status, sessions, problems}` — one
+    /// self-contained row per session, newest first. Runs off the editor
+    /// thread, so a scan of a slow remote home directory does not stall the
+    /// UI; see `fresh-agent-sessions`.
+    ///
+    /// Both arguments are required — the runtime binds by arity. Pass `""`
+    /// for `machine` to take the authority's own label, and `false` for
+    /// `allowCommands` to keep discovery to pure filesystem reads, which
+    /// covers every agent that writes a transcript. `true` additionally runs
+    /// other tools' own listing commands (`tmux list-sessions` and friends).
+    #[plugin_api(
+        async_promise,
+        js_name = "discoverAgentSessions",
+        ts_return = "AgentSessionScan"
+    )]
+    #[qjs(rename = "_discoverAgentSessionsStart")]
+    pub fn discover_agent_sessions_start(
+        &self,
+        _ctx: rquickjs::Ctx<'_>,
+        machine: String,
+        allow_commands: bool,
+    ) -> u64 {
+        let id = self.alloc_request_id();
+        let _ = self
+            .command_sender
+            .send(PluginCommand::DiscoverAgentSessions {
+                machine,
+                allow_commands,
+                callback_id: JsCallbackId::new(id),
+            });
+        id
+    }
+
     /// Get the byte offset of the start of a line (0-indexed line number)
     /// Returns null if the line number is out of range
     #[plugin_api(
@@ -8759,6 +8794,7 @@ const EDITOR_PROMISE_BOOTSTRAP: &str = r#"
                 editor.listCommands = _wrapAsync("_listCommandsStart", "listCommands");
                 editor.prompt = _wrapAsync("_promptStart", "prompt");
                 editor.getNextKey = _wrapAsync("_getNextKeyStart", "getNextKey");
+                editor.discoverAgentSessions = _wrapAsync("_discoverAgentSessionsStart", "discoverAgentSessions");
                 editor.getLineStartPosition = _wrapAsync("_getLineStartPositionStart", "getLineStartPosition");
                 editor.getLineEndPosition = _wrapAsync("_getLineEndPositionStart", "getLineEndPosition");
                 editor.createTerminal = _wrapAsync("_createTerminalStart", "createTerminal");

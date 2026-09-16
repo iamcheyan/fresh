@@ -341,7 +341,15 @@
     "explain.rules_bad": "%{loaded} — %{path} не е файл с правила",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "празно = пътят по подразбиране на машината",
-    "form.k8s_workspace_note": "директория в пода"
+    "form.k8s_workspace_note": "директория в пода",
+    "dock.menu_discover": "Откриване на сесии на агенти…",
+    "dock.discover_running": "Търсене на сесии на агенти…",
+    "dock.discover_found": "Намерени %{count} сесии на агенти на %{machine}: %{summary}",
+    "dock.discover_none": "Няма намерени сесии на агенти на %{machine}",
+    "dock.discover_unreachable": "%{machine} не може да бъде прочетена",
+    "dock.discover_failed": "Откриването на сесии е неуспешно: %{error}",
+    "cmd.discover_sessions": "Orchestrator: откриване на сесии на агенти",
+    "cmd.discover_sessions_desc": "Изброява сесиите на агенти, изпълнявани от други инструменти на тази машина — tmux панели, стенограми на Claude Code и Codex, работни пространства на Orca и Herdr"
   },
   "cs": {
     "cmd.open": "Orchestrator: Otevřít",
@@ -685,7 +693,15 @@
     "explain.rules_bad": "%{loaded} — %{path} není soubor pravidel",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "prázdné = výchozí cesta stroje",
-    "form.k8s_workspace_note": "adresář uvnitř podu"
+    "form.k8s_workspace_note": "adresář uvnitř podu",
+    "dock.menu_discover": "Najít relace agentů…",
+    "dock.discover_running": "Hledání relací agentů…",
+    "dock.discover_found": "Nalezeno %{count} relací agentů na %{machine}: %{summary}",
+    "dock.discover_none": "Na %{machine} nebyly nalezeny žádné relace agentů",
+    "dock.discover_unreachable": "Nelze přečíst %{machine}",
+    "dock.discover_failed": "Hledání relací selhalo: %{error}",
+    "cmd.discover_sessions": "Orchestrator: najít relace agentů",
+    "cmd.discover_sessions_desc": "Vypíše relace agentů, které na tomto počítači běží v jiných nástrojích — panely tmux, přepisy Claude Code a Codex, pracovní prostory Orca a Herdr"
   },
   "de": {
     "cmd.open": "Orchestrator: Öffnen",
@@ -1029,7 +1045,15 @@
     "explain.rules_bad": "%{loaded} — %{path} ist keine Regeldatei",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "leer = Standardpfad der Maschine",
-    "form.k8s_workspace_note": "Verzeichnis im Pod"
+    "form.k8s_workspace_note": "Verzeichnis im Pod",
+    "dock.menu_discover": "Agent-Sitzungen suchen…",
+    "dock.discover_running": "Suche nach Agent-Sitzungen…",
+    "dock.discover_found": "%{count} Agent-Sitzung(en) auf %{machine} gefunden: %{summary}",
+    "dock.discover_none": "Keine Agent-Sitzungen auf %{machine} gefunden",
+    "dock.discover_unreachable": "%{machine} konnte nicht gelesen werden",
+    "dock.discover_failed": "Sitzungssuche fehlgeschlagen: %{error}",
+    "cmd.discover_sessions": "Orchestrator: Agent-Sitzungen suchen",
+    "cmd.discover_sessions_desc": "Zeigt die Agent-Sitzungen anderer Werkzeuge auf diesem Rechner — tmux-Panes, Claude-Code- und Codex-Transkripte, Orca- und Herdr-Arbeitsbereiche"
   },
   "en": {
     "cmd.open": "Orchestrator: Open",
@@ -1373,7 +1397,15 @@
     "explain.rules_bad": "%{loaded} — %{path} is not a rules file",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "blank = the machine's default path",
-    "form.k8s_workspace_note": "directory inside the pod"
+    "form.k8s_workspace_note": "directory inside the pod",
+    "dock.menu_discover": "Discover agent sessions…",
+    "dock.discover_running": "Scanning for agent sessions…",
+    "dock.discover_found": "Found %{count} agent session(s) on %{machine}: %{summary}",
+    "dock.discover_none": "No agent sessions found on %{machine}",
+    "dock.discover_unreachable": "Could not read %{machine}",
+    "dock.discover_failed": "Session discovery failed: %{error}",
+    "cmd.discover_sessions": "Orchestrator: Discover Agent Sessions",
+    "cmd.discover_sessions_desc": "List the agent sessions other tools are running on this machine — tmux panes, Claude Code and Codex transcripts, Orca and Herdr workspaces"
   },
   "es": {
     "cmd.open": "Orchestrator: Abrir",
@@ -1717,7 +1749,15 @@
     "explain.rules_bad": "%{loaded} — %{path} no es un archivo de reglas",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "vacío = ruta predeterminada de la máquina",
-    "form.k8s_workspace_note": "directorio dentro del pod"
+    "form.k8s_workspace_note": "directorio dentro del pod",
+    "dock.menu_discover": "Descubrir sesiones de agente…",
+    "dock.discover_running": "Buscando sesiones de agente…",
+    "dock.discover_found": "%{count} sesión(es) de agente en %{machine}: %{summary}",
+    "dock.discover_none": "No se encontraron sesiones de agente en %{machine}",
+    "dock.discover_unreachable": "No se pudo leer %{machine}",
+    "dock.discover_failed": "Error al descubrir sesiones: %{error}",
+    "cmd.discover_sessions": "Orchestrator: descubrir sesiones de agente",
+    "cmd.discover_sessions_desc": "Enumera las sesiones de agente que otras herramientas ejecutan en esta máquina: paneles tmux, transcripciones de Claude Code y Codex, espacios de Orca y Herdr"
   },
   "fr": {
     "cmd.open": "Orchestrator : ouvrir",
@@ -2061,7 +2101,15 @@
     "explain.rules_bad": "%{loaded} — %{path} n'est pas un fichier de règles",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "vide = chemin par défaut de la machine",
-    "form.k8s_workspace_note": "répertoire dans le pod"
+    "form.k8s_workspace_note": "répertoire dans le pod",
+    "dock.menu_discover": "Découvrir les sessions d’agent…",
+    "dock.discover_running": "Recherche de sessions d’agent…",
+    "dock.discover_found": "%{count} session(s) d’agent trouvée(s) sur %{machine} : %{summary}",
+    "dock.discover_none": "Aucune session d’agent trouvée sur %{machine}",
+    "dock.discover_unreachable": "Impossible de lire %{machine}",
+    "dock.discover_failed": "Échec de la découverte des sessions : %{error}",
+    "cmd.discover_sessions": "Orchestrator : découvrir les sessions d’agent",
+    "cmd.discover_sessions_desc": "Liste les sessions d’agent que d’autres outils exécutent sur cette machine — panneaux tmux, transcriptions Claude Code et Codex, espaces Orca et Herdr"
   },
   "it": {
     "cmd.open": "Orchestrator: Apri",
@@ -2405,7 +2453,15 @@
     "explain.rules_bad": "%{loaded} — %{path} non è un file di regole",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "vuoto = percorso predefinito della macchina",
-    "form.k8s_workspace_note": "directory nel pod"
+    "form.k8s_workspace_note": "directory nel pod",
+    "dock.menu_discover": "Trova sessioni agente…",
+    "dock.discover_running": "Ricerca di sessioni agente…",
+    "dock.discover_found": "Trovate %{count} sessioni agente su %{machine}: %{summary}",
+    "dock.discover_none": "Nessuna sessione agente trovata su %{machine}",
+    "dock.discover_unreachable": "Impossibile leggere %{machine}",
+    "dock.discover_failed": "Ricerca sessioni non riuscita: %{error}",
+    "cmd.discover_sessions": "Orchestrator: trova sessioni agente",
+    "cmd.discover_sessions_desc": "Elenca le sessioni agente che altri strumenti eseguono su questa macchina: riquadri tmux, trascrizioni Claude Code e Codex, spazi Orca e Herdr"
   },
   "ja": {
     "cmd.open": "Orchestrator: 開く",
@@ -2749,7 +2805,15 @@
     "explain.rules_bad": "%{loaded} — %{path} はルールファイルではありません",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "空欄 = マシンの既定パス",
-    "form.k8s_workspace_note": "Pod 内のディレクトリ"
+    "form.k8s_workspace_note": "Pod 内のディレクトリ",
+    "dock.menu_discover": "エージェントセッションを検出…",
+    "dock.discover_running": "エージェントセッションを検索中…",
+    "dock.discover_found": "%{machine} で %{count} 件のエージェントセッションを検出: %{summary}",
+    "dock.discover_none": "%{machine} にエージェントセッションはありません",
+    "dock.discover_unreachable": "%{machine} を読み取れませんでした",
+    "dock.discover_failed": "セッションの検出に失敗しました: %{error}",
+    "cmd.discover_sessions": "Orchestrator: エージェントセッションを検出",
+    "cmd.discover_sessions_desc": "このマシンで他のツールが実行中のエージェントセッションを一覧表示します — tmux ペイン、Claude Code と Codex のトランスクリプト、Orca と Herdr のワークスペース"
   },
   "ko": {
     "cmd.open": "Orchestrator: 열기",
@@ -3093,7 +3157,15 @@
     "explain.rules_bad": "%{loaded} — %{path}은(는) 규칙 파일이 아닙니다",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "비워두면 머신의 기본 경로",
-    "form.k8s_workspace_note": "파드 내부의 디렉터리"
+    "form.k8s_workspace_note": "파드 내부의 디렉터리",
+    "dock.menu_discover": "에이전트 세션 검색…",
+    "dock.discover_running": "에이전트 세션을 검색하는 중…",
+    "dock.discover_found": "%{machine}에서 에이전트 세션 %{count}개 발견: %{summary}",
+    "dock.discover_none": "%{machine}에 에이전트 세션이 없습니다",
+    "dock.discover_unreachable": "%{machine}을(를) 읽을 수 없습니다",
+    "dock.discover_failed": "세션 검색 실패: %{error}",
+    "cmd.discover_sessions": "Orchestrator: 에이전트 세션 검색",
+    "cmd.discover_sessions_desc": "이 컴퓨터에서 다른 도구가 실행 중인 에이전트 세션을 나열합니다 — tmux 창, Claude Code 및 Codex 기록, Orca 및 Herdr 작업 공간"
   },
   "pt-BR": {
     "cmd.open": "Orchestrator: Abrir",
@@ -3437,7 +3509,15 @@
     "explain.rules_bad": "%{loaded} — %{path} não é um arquivo de regras",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "vazio = caminho padrão da máquina",
-    "form.k8s_workspace_note": "diretório dentro do pod"
+    "form.k8s_workspace_note": "diretório dentro do pod",
+    "dock.menu_discover": "Descobrir sessões de agente…",
+    "dock.discover_running": "Procurando sessões de agente…",
+    "dock.discover_found": "%{count} sessão(ões) de agente em %{machine}: %{summary}",
+    "dock.discover_none": "Nenhuma sessão de agente encontrada em %{machine}",
+    "dock.discover_unreachable": "Não foi possível ler %{machine}",
+    "dock.discover_failed": "Falha ao descobrir sessões: %{error}",
+    "cmd.discover_sessions": "Orchestrator: descobrir sessões de agente",
+    "cmd.discover_sessions_desc": "Lista as sessões de agente que outras ferramentas executam nesta máquina — painéis tmux, transcrições do Claude Code e Codex, espaços do Orca e Herdr"
   },
   "ru": {
     "cmd.open": "Orchestrator: Открыть",
@@ -3781,7 +3861,15 @@
     "explain.rules_bad": "%{loaded} — %{path} не файл правил",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "пусто = путь машины по умолчанию",
-    "form.k8s_workspace_note": "каталог внутри пода"
+    "form.k8s_workspace_note": "каталог внутри пода",
+    "dock.menu_discover": "Найти сессии агентов…",
+    "dock.discover_running": "Поиск сессий агентов…",
+    "dock.discover_found": "Найдено сессий агентов на %{machine}: %{count} — %{summary}",
+    "dock.discover_none": "На %{machine} сессии агентов не найдены",
+    "dock.discover_unreachable": "Не удалось прочитать %{machine}",
+    "dock.discover_failed": "Не удалось выполнить поиск сессий: %{error}",
+    "cmd.discover_sessions": "Orchestrator: найти сессии агентов",
+    "cmd.discover_sessions_desc": "Показывает сессии агентов, запущенные другими инструментами на этой машине — панели tmux, стенограммы Claude Code и Codex, рабочие пространства Orca и Herdr"
   },
   "th": {
     "cmd.open": "Orchestrator: เปิด",
@@ -4125,7 +4213,15 @@
     "explain.rules_bad": "%{loaded} — %{path} ไม่ใช่ไฟล์กฎ",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "ว่าง = พาธเริ่มต้นของเครื่อง",
-    "form.k8s_workspace_note": "ไดเรกทอรีภายใน pod"
+    "form.k8s_workspace_note": "ไดเรกทอรีภายใน pod",
+    "dock.menu_discover": "ค้นหาเซสชันเอเจนต์…",
+    "dock.discover_running": "กำลังค้นหาเซสชันเอเจนต์…",
+    "dock.discover_found": "พบเซสชันเอเจนต์ %{count} รายการบน %{machine}: %{summary}",
+    "dock.discover_none": "ไม่พบเซสชันเอเจนต์บน %{machine}",
+    "dock.discover_unreachable": "ไม่สามารถอ่าน %{machine} ได้",
+    "dock.discover_failed": "ค้นหาเซสชันไม่สำเร็จ: %{error}",
+    "cmd.discover_sessions": "Orchestrator: ค้นหาเซสชันเอเจนต์",
+    "cmd.discover_sessions_desc": "แสดงเซสชันเอเจนต์ที่เครื่องมืออื่นกำลังรันบนเครื่องนี้ — แพเนล tmux, บันทึกของ Claude Code และ Codex, เวิร์กสเปซของ Orca และ Herdr"
   },
   "uk": {
     "cmd.open": "Orchestrator: Відкрити",
@@ -4469,7 +4565,15 @@
     "explain.rules_bad": "%{loaded} — %{path} не файл правил",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "порожньо = типовий шлях машини",
-    "form.k8s_workspace_note": "каталог усередині пода"
+    "form.k8s_workspace_note": "каталог усередині пода",
+    "dock.menu_discover": "Знайти сесії агентів…",
+    "dock.discover_running": "Пошук сесій агентів…",
+    "dock.discover_found": "Знайдено сесій агентів на %{machine}: %{count} — %{summary}",
+    "dock.discover_none": "На %{machine} сесій агентів не знайдено",
+    "dock.discover_unreachable": "Не вдалося прочитати %{machine}",
+    "dock.discover_failed": "Не вдалося виконати пошук сесій: %{error}",
+    "cmd.discover_sessions": "Orchestrator: знайти сесії агентів",
+    "cmd.discover_sessions_desc": "Показує сесії агентів, запущені іншими інструментами на цій машині — панелі tmux, стенограми Claude Code і Codex, робочі простори Orca та Herdr"
   },
   "vi": {
     "cmd.open": "Orchestrator: Mở",
@@ -4813,7 +4917,15 @@
     "explain.rules_bad": "%{loaded} — %{path} không phải là tệp quy tắc",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "để trống = đường dẫn mặc định của máy",
-    "form.k8s_workspace_note": "thư mục bên trong pod"
+    "form.k8s_workspace_note": "thư mục bên trong pod",
+    "dock.menu_discover": "Tìm phiên tác nhân…",
+    "dock.discover_running": "Đang tìm phiên tác nhân…",
+    "dock.discover_found": "Tìm thấy %{count} phiên tác nhân trên %{machine}: %{summary}",
+    "dock.discover_none": "Không tìm thấy phiên tác nhân nào trên %{machine}",
+    "dock.discover_unreachable": "Không thể đọc %{machine}",
+    "dock.discover_failed": "Tìm phiên thất bại: %{error}",
+    "cmd.discover_sessions": "Orchestrator: tìm phiên tác nhân",
+    "cmd.discover_sessions_desc": "Liệt kê các phiên tác nhân mà công cụ khác đang chạy trên máy này — khung tmux, bản ghi Claude Code và Codex, không gian làm việc Orca và Herdr"
   },
   "zh-CN": {
     "cmd.open": "Orchestrator：打开",
@@ -5157,6 +5269,14 @@
     "explain.rules_bad": "%{loaded} — %{path} 不是规则文件",
     "machine.from_ssh_config": "~/.ssh/config",
     "form.machine_path_note": "留空 = 机器的默认路径",
-    "form.k8s_workspace_note": "Pod 内的目录"
+    "form.k8s_workspace_note": "Pod 内的目录",
+    "dock.menu_discover": "发现代理会话…",
+    "dock.discover_running": "正在查找代理会话…",
+    "dock.discover_found": "在 %{machine} 上发现 %{count} 个代理会话：%{summary}",
+    "dock.discover_none": "在 %{machine} 上未发现代理会话",
+    "dock.discover_unreachable": "无法读取 %{machine}",
+    "dock.discover_failed": "发现会话失败：%{error}",
+    "cmd.discover_sessions": "Orchestrator：发现代理会话",
+    "cmd.discover_sessions_desc": "列出本机上其他工具正在运行的代理会话 — tmux 窗格、Claude Code 与 Codex 记录、Orca 与 Herdr 工作区"
   }
 }

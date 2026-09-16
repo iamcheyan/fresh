@@ -67,6 +67,58 @@ impl OffLoop {
     }
 }
 
+/// Editor-thread-collected inputs for a session scan.
+///
+/// Only a name and a flag: the filesystem arrives on the capability handle,
+/// which is the whole authority this needs. Nothing about editor state is
+/// captured, because the scan does not depend on any.
+pub(crate) struct DiscoverSessionsRequest {
+    pub machine: String,
+    pub allow_commands: bool,
+    pub platform: fresh_agent_sessions::Platform,
+    pub callback_id: JsCallbackId,
+}
+
+/// Scan this session's machine for agent sessions other tools are running.
+///
+/// `spawn_blocking`, not `spawn`: `collect_sessions` is a synchronous call and
+/// a remote filesystem blocks on its transport, so running it on a reactor
+/// thread would stall every other task on that worker. This is the one place
+/// the sync-scanner-over-async-transport decision is made, and it is made
+/// here rather than inside the scanner so the scanner stays a plain function.
+pub(crate) fn discover_agent_sessions(
+    runtime: &LiveRuntime,
+    cap: OffLoop,
+    req: DiscoverSessionsRequest,
+) {
+    runtime.spawn_blocking(move || {
+        let DiscoverSessionsRequest {
+            machine,
+            allow_commands,
+            platform,
+            callback_id,
+        } = req;
+
+        let target = crate::services::agent_sessions::AuthorityTarget::from_parts(
+            Arc::clone(&cap.filesystem),
+            machine,
+            platform,
+            allow_commands,
+        );
+        // Nothing supersedes a discovery scan today, so the flag exists to
+        // satisfy the scanner's signature and to give a future "cancel" a
+        // place to land rather than needing a new plumbing path.
+        let cancel = AtomicBool::new(false);
+        let result = fresh_agent_sessions::collect_sessions(&target, &cancel);
+
+        cap.settle(
+            callback_id,
+            serde_json::to_string(&result)
+                .map_err(|err| format!("could not serialise session scan: {err}")),
+        );
+    });
+}
+
 /// Editor-thread-collected inputs for a project grep. Everything here is a
 /// snapshot: the piece tree is not `Send`, so dirty buffers are captured as
 /// `HybridSearchPlan`s while still on the editor thread.

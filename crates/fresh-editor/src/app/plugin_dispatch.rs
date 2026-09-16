@@ -1901,6 +1901,14 @@ impl Editor {
                 self.handle_release_diff_baseline(baseline_id);
             }
 
+            PluginCommand::DiscoverAgentSessions {
+                machine,
+                allow_commands,
+                callback_id,
+            } => {
+                self.handle_discover_agent_sessions(machine, allow_commands, callback_id);
+            }
+
             PluginCommand::GrepProject {
                 plugin_name,
                 pattern,

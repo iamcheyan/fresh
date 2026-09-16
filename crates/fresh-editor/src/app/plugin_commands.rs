@@ -3406,6 +3406,61 @@ impl Editor {
     /// as file offsets rather than copied — but a large fully-loaded dirty
     /// buffer is copied in full, once per call. Worth knowing before adding
     /// anything else to this path.
+    /// Hand a session scan to the off-loop worker.
+    ///
+    /// The editor-thread half is deliberately trivial: name the machine, note
+    /// whether commands are allowed, hand over the authority's filesystem.
+    /// Everything expensive happens on the worker.
+    pub(super) fn handle_discover_agent_sessions(
+        &mut self,
+        machine: String,
+        allow_commands: bool,
+        callback_id: fresh_core::api::JsCallbackId,
+    ) {
+        let Some(runtime) = self.tokio_runtime.clone() else {
+            self.plugin_manager
+                .read()
+                .unwrap()
+                .reject_callback(callback_id, "No tokio runtime available".to_string());
+            return;
+        };
+        let Some(sender) = self.async_bridge.as_ref().map(|b| b.sender()) else {
+            self.plugin_manager
+                .read()
+                .unwrap()
+                .reject_callback(callback_id, "No async bridge available".to_string());
+            return;
+        };
+        let authority = self.authority();
+        // An empty name means "derive one": the authority's own label, else
+        // "local". A stable name matters — it lands in every session key.
+        let machine = if machine.trim().is_empty() {
+            let label = authority.display_label.clone();
+            if label.is_empty() {
+                "local".to_string()
+            } else {
+                label
+            }
+        } else {
+            machine
+        };
+        let platform = crate::services::agent_sessions::platform_of(authority);
+
+        super::plugin_offloop::discover_agent_sessions(
+            &runtime,
+            super::plugin_offloop::OffLoop {
+                filesystem: authority.filesystem.clone(),
+                sender,
+            },
+            super::plugin_offloop::DiscoverSessionsRequest {
+                machine,
+                allow_commands,
+                platform,
+                callback_id,
+            },
+        );
+    }
+
     pub(super) fn handle_grep_project(
         &mut self,
         plugin_name: String,

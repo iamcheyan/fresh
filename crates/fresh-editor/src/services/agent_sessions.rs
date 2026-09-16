@@ -55,6 +55,10 @@ pub struct AuthorityTarget {
     name: String,
     home: PathBuf,
     platform: Platform,
+    /// Whether the scan may run other tools' listing commands. Always false
+    /// today — see [`Target::run`] below — and carried so the decision has one
+    /// home when a spawner bridge lands.
+    allow_commands: bool,
 }
 
 impl AuthorityTarget {
@@ -63,24 +67,48 @@ impl AuthorityTarget {
     /// `home` is resolved once here: it cannot change for the life of an
     /// authority, and over SSH it costs a round trip.
     pub fn new(authority: &Authority, name: impl Into<String>) -> Self {
-        let filesystem = Arc::clone(&authority.filesystem);
+        Self::from_parts(
+            Arc::clone(&authority.filesystem),
+            name,
+            platform_of(authority),
+            false,
+        )
+    }
+
+    /// Build one from the pieces the off-loop capability handle carries.
+    ///
+    /// The off-loop worker holds a filesystem, not an `Authority` — by design,
+    /// since it must not be able to reach editor state — so this is the
+    /// constructor that path uses.
+    pub fn from_parts(
+        filesystem: Arc<dyn FileSystem + Send + Sync>,
+        name: impl Into<String>,
+        platform: Platform,
+        allow_commands: bool,
+    ) -> Self {
         let home = filesystem.home_dir().unwrap_or_default();
-        // From the authority's own backend descriptor, not guessed from a
-        // display string: `session_spec` is what actually knows whether this
-        // is the local host or something reached over a transport.
-        let platform = match authority.session_spec() {
-            SessionAuthoritySpec::Local => Platform::host(),
-            // Everything the scanner targets remotely is unix-shaped, and the
-            // one platform-specific decision it makes (where desktop apps keep
-            // their support directories) is only reachable locally anyway.
-            _ => Platform::Linux,
-        };
         Self {
             filesystem,
             name: name.into(),
             home,
             platform,
+            allow_commands,
         }
+    }
+}
+
+/// The platform an authority's machine runs.
+///
+/// Read from the authority's own backend descriptor, not guessed from a
+/// display string: `session_spec` is what actually knows whether this is the
+/// local host or something reached over a transport.
+pub fn platform_of(authority: &Authority) -> Platform {
+    match authority.session_spec() {
+        SessionAuthoritySpec::Local => Platform::host(),
+        // Everything the scanner targets remotely is unix-shaped, and the one
+        // platform-specific decision it makes (where desktop apps keep their
+        // support directories) is only reachable locally anyway.
+        _ => Platform::Linux,
     }
 }
 
@@ -99,59 +127,22 @@ impl Target for AuthorityTarget {
         opts: &WalkOpts,
         cancel: &AtomicBool,
     ) -> std::io::Result<Vec<Entry>> {
-        // A missing root means "not installed", and `walk_files` on a missing
-        // directory is an error, so answer that before walking.
-        if !self.filesystem.is_dir(root).unwrap_or(false) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{} is not a directory", root.display()),
-            ));
-        }
-
-        let skip: Vec<&str> = opts.skip_dirs.iter().map(String::as_str).collect();
-        let root_depth = root.components().count();
-        let mut entries = Vec::new();
-
-        // One server-side walk. `walk_files` yields files only, so the
-        // directories between them are reconstructed from their paths rather
-        // than by listing each level — which is the whole point: no round trip
-        // per directory.
-        let mut seen_dirs = std::collections::BTreeSet::new();
-        self.filesystem
-            .walk_files(root, &skip, cancel, &mut |path, _rel| {
-                if entries.len() >= opts.max_entries {
-                    return false;
-                }
-                if path.components().count() - root_depth > opts.max_depth {
-                    return true;
-                }
-                let mut parent = path.parent();
-                while let Some(dir) = parent {
-                    if dir == root || !dir.starts_with(root) {
-                        break;
-                    }
-                    if !seen_dirs.insert(dir.to_path_buf()) {
-                        break;
-                    }
-                    entries.push(entry_at(dir, EntryKind::Dir, 0));
-                    parent = dir.parent();
-                }
-                // `walk_files` carries no mtime, so it costs one stat per
-                // *file* — not per directory, and not per level. Reducing this
-                // further needs the metadata in the walk itself; see the
-                // module docs.
-                let modified = self
-                    .filesystem
-                    .metadata(path)
-                    .ok()
-                    .and_then(|meta| meta.modified)
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_secs());
-                entries.push(entry_at(path, EntryKind::File, modified));
-                true
-            })?;
-
-        Ok(entries)
+        // `FileSystem::walk_files` is the bulk primitive, and a remote
+        // implementation runs it server-side — but it skips every entry whose
+        // name starts with `.`, because it exists for project file search.
+        // Every store this scans is a dotfile directory (`~/.claude`,
+        // `~/.codex`, `~/.config/herdr`), so using it here returns nothing at
+        // all.
+        //
+        // So this walks with `read_dir`, which is correct but costs one round
+        // trip per directory. That is tolerable only because these trees are
+        // deliberately shallow — `WalkOpts::max_depth` is 1 to 4 — and it is
+        // the one thing in this integration that should not stay as it is.
+        // The fix is a bulk walk that can be told to include hidden entries;
+        // see the module docs.
+        let mut out = Vec::new();
+        self.walk_dir(root, root, opts, cancel, 1, &mut out)?;
+        Ok(out)
     }
 
     fn read_prefix(&self, path: &Path, max_bytes: usize) -> std::io::Result<Vec<u8>> {
@@ -193,8 +184,74 @@ fn entry_at(path: &Path, kind: EntryKind, modified_unix: u64) -> Entry {
     }
 }
 
+impl AuthorityTarget {
+    fn walk_dir(
+        &self,
+        root: &Path,
+        dir: &Path,
+        opts: &WalkOpts,
+        cancel: &AtomicBool,
+        depth: usize,
+        out: &mut Vec<Entry>,
+    ) -> std::io::Result<()> {
+        use std::sync::atomic::Ordering;
+
+        if depth > opts.max_depth || out.len() >= opts.max_entries {
+            return Ok(());
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let entries = match self.filesystem.read_dir(dir) {
+            Ok(entries) => entries,
+            // A missing root means "not installed"; an unreadable subdirectory
+            // is not worth failing the whole walk over.
+            Err(err) if dir == root => return Err(err),
+            Err(_) => return Ok(()),
+        };
+
+        for entry in entries {
+            if out.len() >= opts.max_entries {
+                return Ok(());
+            }
+            let kind = kind_of(entry.entry_type);
+            let from_listing = entry
+                .metadata
+                .as_ref()
+                .and_then(|meta| meta.modified)
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            // `read_dir` fills metadata lazily, so fall back to a stat for the
+            // files whose mtime the scan actually sorts on.
+            let modified_unix = if from_listing == 0 && kind == EntryKind::File {
+                self.filesystem
+                    .metadata(&entry.path)
+                    .ok()
+                    .and_then(|meta| meta.modified)
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs())
+            } else {
+                from_listing
+            };
+
+            let path = entry.path.clone();
+            let name = entry.name.clone();
+            out.push(Entry {
+                path: path.clone(),
+                name: name.clone(),
+                kind,
+                modified_unix,
+            });
+            // Symlinks are listed but never descended.
+            if kind == EntryKind::Dir && !opts.skip_dirs.iter().any(|skip| *skip == name) {
+                self.walk_dir(root, &path, opts, cancel, depth + 1, out)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Map a `FileSystem` entry type onto the scanner's.
-#[allow(dead_code, reason = "used once `walk_files` carries entry types")]
 fn kind_of(entry_type: EntryType) -> EntryKind {
     match entry_type {
         EntryType::Directory => EntryKind::Dir,
@@ -214,6 +271,13 @@ pub fn collect_sessions_for(
     cancel: &AtomicBool,
 ) -> ScanResult {
     collect_sessions(&AuthorityTarget::new(authority, machine), cancel)
+}
+
+impl AuthorityTarget {
+    /// Whether this target was built to allow listing commands.
+    pub fn allows_commands(&self) -> bool {
+        self.allow_commands
+    }
 }
 
 #[cfg(test)]

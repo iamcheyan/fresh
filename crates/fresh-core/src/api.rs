@@ -5636,6 +5636,21 @@ pub enum PluginCommand {
     /// Project-wide grep search (async)
     /// Searches all project files via FileSystem trait, respecting .gitignore.
     /// For open buffers with dirty edits, searches the buffer's piece tree.
+    /// Discover agent sessions that other tools are running on this
+    /// session's machine.
+    ///
+    /// Runs off the editor thread — the scan walks a home directory and, over
+    /// a remote authority, does so across the wire. Settles the plugin's
+    /// promise with the serialised session list.
+    DiscoverAgentSessions {
+        /// The machine's name, as it should appear in every session key. The
+        /// caller's own label for the authority; empty means "derive one".
+        machine: String,
+        /// Whether the scan may run other tools' listing commands (tmux and
+        /// friends). Off keeps the scan to pure filesystem reads.
+        allow_commands: bool,
+        callback_id: JsCallbackId,
+    },
     GrepProject {
         /// Which plugin asked. Coalescing is per plugin: a newer grep replaces
         /// that plugin's own in-flight one, and never another plugin's.

@@ -5364,6 +5364,7 @@ function dockMainOptions(): MenuOption[] {
     { key: "main:folder", label: editor.t("dock.new_menu_folder") },
     { key: "main:manage", label: editor.t("dock.menu_manage") },
     { key: "main:machines", label: editor.t("dock.menu_machines") },
+    { key: "main:discover", label: editor.t("dock.menu_discover") },
     { key: "main:view:compact", label: editor.t("dock.menu_view_compact"), marked: dockView === "compact" },
     { key: "main:view:card", label: editor.t("dock.menu_view_card"), marked: dockView === "card" },
     { key: "main:empty", label: editor.t("dock.show_empty"), marked: !openDialog.hideTrivial },
@@ -5539,6 +5540,11 @@ function runDockMenuOption(optKey: string): void {
   if (optKey === "main:machines") {
     closeDockMenu();
     openMachinesDialog();
+    return;
+  }
+  if (optKey === "main:discover") {
+    closeDockMenu();
+    void discoverAgentSessions();
     return;
   }
   // The settings flip in place and the menu stays up, so a second choice
@@ -9073,6 +9079,57 @@ function machineForHost(h: SshConfigHost): Machine {
     path: "",
     lastTest: sshHostTests.get(h.alias) ?? null,
   };
+}
+
+// Report the agent sessions other tools are running on this session's
+// machine — tmux panes, Claude Code and Codex transcripts, Orca and Herdr
+// workspaces. Read-only: this lists what is already there and changes
+// nothing, which is why it needs no confirmation.
+//
+// The scan runs off the editor thread, so this awaits rather than blocking
+// the dock; a slow remote home directory shows the pending notice and then
+// the result.
+async function discoverAgentSessions(): Promise<void> {
+  editor.setStatus(editor.t("dock.discover_running"));
+  try {
+    // Both arguments are required: the plugin runtime binds by arity.
+    // "" takes the authority's own label for the machine; `true` lets the
+    // scan also ask tmux and friends for their live session lists, which is
+    // what makes a running pane show up before its agent writes a transcript.
+    const scan = await editor.discoverAgentSessions("", true);
+    if (scan.status.state !== "reachable") {
+      editor.setStatus(
+        editor.t("dock.discover_unreachable", { machine: scan.machine }),
+      );
+      return;
+    }
+    const agents = scan.sessions.filter((s) => s.agent !== undefined && s.agent !== null);
+    if (agents.length === 0) {
+      editor.setStatus(editor.t("dock.discover_none", { machine: scan.machine }));
+      return;
+    }
+    // Summarised by agent rather than listed: the dock's own rows are the
+    // place to browse sessions, and a status line that names twelve of them
+    // is unreadable.
+    const byAgent = new Map<string, number>();
+    for (const session of agents) {
+      const agent = String(session.agent);
+      byAgent.set(agent, (byAgent.get(agent) ?? 0) + 1);
+    }
+    const summary = [...byAgent.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([agent, count]) => `${count} ${agent}`)
+      .join(", ");
+    editor.setStatus(
+      editor.t("dock.discover_found", {
+        count: String(agents.length),
+        machine: scan.machine,
+        summary,
+      }),
+    );
+  } catch (err) {
+    editor.setStatus(editor.t("dock.discover_failed", { error: String(err) }));
+  }
 }
 
 function openMachinesDialog(): void {
@@ -15346,6 +15403,15 @@ registerHandler("orchestrator_reload_rules", () => {
 editor.registerCommand("%cmd.reload_rules", "%cmd.reload_rules_desc", "orchestrator_reload_rules", null, {
   terminalBypass: true,
 });
+
+registerHandler("orchestrator_discover_sessions", () => void discoverAgentSessions());
+editor.registerCommand(
+  "%cmd.discover_sessions",
+  "%cmd.discover_sessions_desc",
+  "orchestrator_discover_sessions",
+  null,
+  { terminalBypass: true },
+);
 
 registerHandler("orchestrator_jump", jumpToAttention);
 editor.registerCommand("%cmd.jump", "%cmd.jump_desc", "orchestrator_jump", null, {
