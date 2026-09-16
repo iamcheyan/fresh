@@ -43,12 +43,17 @@ impl LocalTarget {
     }
 
     /// A target rooted at `home` with nothing else set. For tests.
+    ///
+    /// The platform is the real host's, not a fixed one: this target reads the
+    /// machine it is running on, so claiming to be Linux on Windows would make
+    /// it judge that machine's own paths by rules the machine does not use.
+    /// Use [`Self::with_platform`] to pretend otherwise on purpose.
     pub fn at(home: impl Into<PathBuf>) -> Self {
         Self {
             name: "local".to_string(),
             home: home.into(),
             vars: BTreeMap::new(),
-            platform: Platform::Linux,
+            platform: Platform::host(),
             uid: Some(1000),
             path_dirs: Vec::new(),
             allow_commands: false,
@@ -269,4 +274,36 @@ extern "C" {
 #[cfg(not(unix))]
 fn current_uid() -> u32 {
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::target::is_absolute_on;
+
+    #[test]
+    fn a_local_target_judges_its_own_machines_paths_by_that_machines_rules() {
+        // This target reads the real local filesystem, so the platform it
+        // reports has to be the real one. When it claimed to be Linux, a
+        // genuine Windows path like `D:\...` was judged by unix rules, and
+        // every `*_HOME` override on Windows was silently ignored.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = LocalTarget::at(tmp.path());
+
+        assert_eq!(target.platform(), Platform::host());
+
+        let real_path = tmp.path().to_string_lossy().into_owned();
+        assert!(
+            is_absolute_on(target.platform(), &real_path),
+            "a real local absolute path must read as absolute to the target \
+             that produced it: {real_path}"
+        );
+    }
+
+    #[test]
+    fn with_platform_still_overrides_it_on_purpose() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = LocalTarget::at(tmp.path()).with_platform(Platform::Windows);
+        assert_eq!(target.platform(), Platform::Windows);
+    }
 }
