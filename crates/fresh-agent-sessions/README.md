@@ -89,8 +89,8 @@ GPL-2.0, like the rest of the workspace, and it adds no dependencies. No
 third-party code is vendored or copied: the formats were worked out from facts
 (paths, environment variables, filename patterns, JSON field names), with
 Orca (MIT) and Herdr (Apache-2.0) consulted as references. Apache-2.0 is
-incompatible with GPL-2.0, so that one was checked mechanically — see
-[THIRD-PARTY-NOTES.md](THIRD-PARTY-NOTES.md).
+incompatible with GPL-2.0 (though not with GPL-3.0), so that one was checked
+mechanically — see [THIRD-PARTY-NOTES.md](THIRD-PARTY-NOTES.md).
 
 ## Privacy
 

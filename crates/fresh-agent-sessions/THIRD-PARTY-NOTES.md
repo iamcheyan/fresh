@@ -50,10 +50,27 @@ comment and source text of both projects by n-gram overlap.
   noun phrases ("the agent's own session id"), literal path patterns, and this
   crate's own citations of Orca's filenames.
 
-**Apache-2.0 and GPL-2.0.** Apache-2.0 is generally held to be incompatible
-with GPL-2.0 (it is compatible with GPLv3). That is the one combination here
-that would matter, and it does not arise: Herdr contributed format facts and
-nothing else, and no Herdr code or text is present or distributed.
+**Apache-2.0 and the GPL version.** Apache-2.0 is incompatible with GPL-2.0
+but *compatible* with GPL-3.0, so the workspace's licence version decides
+whether this combination matters at all:
+
+* **Under GPL-2.0** (where the workspace sits today) it is the one pairing that
+  could bite — and it does not arise, because Herdr contributed format facts
+  and nothing else.
+* **Under GPL-3.0** the question disappears entirely: Apache-2.0 material may
+  be combined into a GPLv3 work, so even the boilerplate matches would be
+  moot, and Herdr's status stops being a constraint on this crate at all.
+
+Either way nothing here changes: no Herdr code or text is present or
+distributed. The move to GPLv3 only widens the margin.
+
+Note for whoever makes that move: the repository is GPL-2.0 **without** an "or
+later" grant (`LICENSE` is the bare v2 text — the "or (at your option) any
+later version" line at its end belongs to the *how to apply these terms*
+appendix, not to a grant, and no source file carries a version header).
+Relicensing to v3 therefore needs the agreement of every copyright holder;
+`git shortlog -sne --all` currently lists six. That is a repository-wide
+decision and nothing in this crate depends on the outcome.
 
 **Reading the source was permitted.** Both MIT and Apache-2.0 grant the right
 to use and study the software. No clean-room separation was needed, and none is
