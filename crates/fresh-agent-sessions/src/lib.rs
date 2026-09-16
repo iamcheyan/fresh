@@ -74,6 +74,30 @@
 //! reported as existing and are not read for their secrets: see
 //! [`providers::orchestrators`].
 //!
+//! # The flat view a UI wants
+//!
+//! [`Discovery`] is shaped like the scan that produced it: grouped by tool,
+//! with cross-tool hypotheses to one side. [`collect`] turns it into
+//! [`CollectedSession`] rows — one per session, each answering every question
+//! a list row can be asked without referring back to anything:
+//!
+//! ```no_run
+//! # use std::sync::Arc;
+//! use fresh_agent_sessions::{collect, scan, Env, Host};
+//! # fn configured_machines() -> Vec<(String, Arc<dyn Host>)> { Vec::new() }
+//! let mut rows = Vec::new();
+//! for (name, host) in configured_machines() {
+//!     let env = Env::from_process().with_host(host).with_machine(name);
+//!     rows.extend(collect(&scan(&env)));
+//! }
+//! rows.sort_by_key(|row| std::cmp::Reverse(row.last_active_unix));
+//! ```
+//!
+//! Each row names the machine it came from, the agent, the multiplexer or
+//! orchestrator that probably owns it, every path involved, and how much of
+//! that to believe. Scans are independent and stateless, so a caller drives
+//! one per machine, on whatever schedule it likes, and concatenates.
+//!
 //! # Scanning another machine
 //!
 //! A scan is not tied to this machine. Everything it reads goes through the
@@ -100,12 +124,16 @@
 //! would invent a session that exists on neither.
 
 pub mod catalog;
+pub mod collected;
 pub mod env;
 pub mod host;
 pub mod model;
 pub mod providers;
 pub mod scan;
 
+pub use collected::{
+    collect, CollectedSession, MachineId, Owner, OwnerKind, SessionKey, SessionKind, SessionPaths,
+};
 pub use env::{CommandRunner, Env, Platform, ProcessRunner, StubRunner};
 pub use host::{EntryKind, Host, HostEntry, HostMetadata, LocalHost};
 pub use model::{

@@ -86,6 +86,7 @@ pub fn scan_with(env: &Env, options: &ScanOptions) -> Discovery {
     tools.sort_by_key(|report| report.tool.as_str());
 
     let mut discovery = Discovery {
+        machine: env.machine().to_string(),
         scanned_at_unix: env.now_unix(),
         tools,
         links: Vec::new(),

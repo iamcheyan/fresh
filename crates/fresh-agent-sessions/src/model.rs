@@ -530,6 +530,14 @@ pub enum LinkReason {
 /// The result of a scan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Discovery {
+    /// Which machine this scan looked at.
+    ///
+    /// Every [`crate::SessionKey`] carries it, which is what makes rows from
+    /// separate scans safe to concatenate: two machines can hold the same
+    /// session id, and a key without a machine in it would merge two different
+    /// conversations into one row.
+    #[serde(default)]
+    pub machine: String,
     /// When the scan ran, as a unix timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scanned_at_unix: Option<u64>,

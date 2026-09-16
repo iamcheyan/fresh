@@ -11,12 +11,14 @@
 
 use std::process::ExitCode;
 
-use fresh_agent_sessions::{scan_with, Confidence, Env, Installed, ScanOptions};
+use fresh_agent_sessions::{collect, scan_with, Confidence, Env, Installed, ScanOptions};
 
 fn main() -> ExitCode {
     let mut options = ScanOptions::default();
     let mut json = false;
     let mut commands = false;
+    let mut flat = false;
+    let mut machine: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -25,6 +27,14 @@ fn main() -> ExitCode {
             "--all" => options.include_absent = true,
             "--commands" => commands = true,
             "--no-correlate" => options.correlate = false,
+            "--flat" => flat = true,
+            "--machine" => match args.next() {
+                Some(name) => machine = Some(name),
+                None => {
+                    eprintln!("--machine needs a name");
+                    return ExitCode::FAILURE;
+                }
+            },
             "--limit" => match args.next().and_then(|value| value.parse().ok()) {
                 Some(limit) => options.max_sessions_per_tool = limit,
                 None => {
@@ -49,7 +59,41 @@ fn main() -> ExitCode {
     } else {
         env
     };
+    let env = match machine {
+        Some(name) => env.with_machine(name),
+        None => env,
+    };
     let discovery = scan_with(&env, &options);
+
+    // The flat view is what a UI consumes: one self-contained row per session,
+    // newest first, safe to concatenate with another machine's rows.
+    if flat {
+        let rows = collect(&discovery);
+        if json {
+            match serde_json::to_string_pretty(&rows) {
+                Ok(text) => println!("{text}"),
+                Err(err) => {
+                    eprintln!("could not serialize sessions: {err}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            return ExitCode::SUCCESS;
+        }
+        for row in &rows {
+            let owner = match row.owner.pane.as_deref() {
+                Some(pane) => format!("{}:{pane}", row.owner.display_name),
+                None => row.owner.display_name.clone(),
+            };
+            println!(
+                "{:<10} {:<9} {:<26} {}",
+                row.key.machine.as_str(),
+                row.agent.map(|agent| agent.as_str()).unwrap_or("-"),
+                owner,
+                row.display_title()
+            );
+        }
+        return ExitCode::SUCCESS;
+    }
 
     if json {
         match serde_json::to_string_pretty(&discovery) {
@@ -73,7 +117,9 @@ fresh-agent-sessions — find agent sessions, workspaces and worktrees that othe
   --all            include tools that left nothing behind
   --commands       allow running tools' own listing commands (tmux, zellij, sc)
   --no-correlate   skip cross-tool linking
-  --limit N        cap sessions reported per tool (default 200)";
+  --limit N        cap sessions reported per tool (default 200)
+  --flat           one self-contained row per session (what a UI consumes)
+  --machine NAME   name this machine in every session key";
 
 fn print_human(discovery: &fresh_agent_sessions::Discovery, commands: bool) {
     let reports: Vec<_> = discovery.tools.iter().collect();

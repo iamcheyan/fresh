@@ -142,6 +142,10 @@ pub struct Env {
     local: LocalHost,
     /// A caller-supplied host. When present it answers everything.
     host: Option<Arc<dyn Host>>,
+    /// Overrides the host's own label. A caller scanning several machines
+    /// names them the way its configuration does, which is what the user
+    /// recognises in a list.
+    machine: Option<String>,
     runner: Box<dyn CommandRunner>,
     commands_enabled: bool,
 }
@@ -179,6 +183,7 @@ impl Env {
                 path_dirs,
             },
             host: None,
+            machine: None,
             runner: Box::new(NoCommands),
             commands_enabled: false,
         }
@@ -195,9 +200,21 @@ impl Env {
                 path_dirs: Vec::new(),
             },
             host: None,
+            machine: None,
             runner: Box::new(NoCommands),
             commands_enabled: false,
         }
+    }
+
+    /// Name this machine, overriding the host's own label.
+    ///
+    /// Use the same name the caller's configuration uses. It ends up in every
+    /// [`crate::SessionKey`], so it must be stable across scans — a label that
+    /// changes turns every row into a new one.
+    #[must_use]
+    pub fn with_machine(mut self, machine: impl Into<String>) -> Self {
+        self.machine = Some(machine.into());
+        self
     }
 
     /// Scan `host` instead of this machine.
@@ -218,6 +235,13 @@ impl Env {
             Some(host) => host.as_ref(),
             None => &self.local,
         }
+    }
+
+    /// The name of the scanned machine: the caller's, else the host's own.
+    pub fn machine(&self) -> &str {
+        self.machine
+            .as_deref()
+            .unwrap_or_else(|| self.host().label())
     }
 
     /// A short label for the scanned machine, for evidence and UI.
