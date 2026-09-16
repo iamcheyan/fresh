@@ -9,6 +9,11 @@ homepage.workspace = true
 description = "Read-only discovery of agent sessions, workspaces and worktrees managed by third-party tools: terminal multiplexers (tmux, screen, zellij), agent orchestrators (Orca, Herdr, Superset, super.engineering) and coding-agent CLIs (Claude Code, Codex, Cursor, Gemini, and ~20 more)"
 keywords = ["agent", "session", "tmux", "worktree", "discovery"]
 categories = ["command-line-utilities", "development-tools"]
+# Not published yet. `cargo publish` at the workspace root selects every
+# default-member, so leaving this unset would put a brand-new crate name on
+# crates.io with the next release — and a name, once taken, cannot be given
+# back. Publishing this is a deliberate decision; delete this line to make it.
+publish = false
 
 [lib]
 name = "fresh_agent_sessions"
