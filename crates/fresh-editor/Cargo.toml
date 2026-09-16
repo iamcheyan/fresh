@@ -175,6 +175,7 @@ wasm = [
 [dependencies]
 # Local crates
 fresh-core.workspace = true
+fresh-agent-sessions.workspace = true
 # The data / presentation-primitives layer: config, the text model, the
 # render primitives, the widget tree and the theme data. Split out so an
 # edit anywhere in `app`/`view`/`services` does not recompile 85k lines that

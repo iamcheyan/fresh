@@ -3,6 +3,7 @@
 //! This module contains all code that deals with external processes,
 //! I/O, and async operations.
 
+pub mod agent_sessions;
 pub mod async_bridge;
 pub mod authority;
 pub mod clipboard;

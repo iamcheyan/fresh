@@ -31,7 +31,10 @@
 //!
 //! # Wiring it to an `Authority`
 //!
-//! The adapter lives in the editor, where both types are in scope:
+//! The adapter lives in the editor, where both types are in scope. It is real
+//! code, not a suggestion — see `fresh-editor`'s
+//! `services::agent_sessions::AuthorityHost`, which is this sketch compiled
+//! and tested against the actual `Authority`:
 //!
 //! ```ignore
 //! struct AuthorityHost {

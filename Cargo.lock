@@ -1445,6 +1445,7 @@ dependencies = [
  "ctor",
  "dirs",
  "encoding_rs",
+ "fresh-agent-sessions",
  "fresh-core",
  "fresh-editor-core",
  "fresh-gui",
