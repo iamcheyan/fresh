@@ -5633,9 +5633,6 @@ pub enum PluginCommand {
     /// automatically when their buffer closes.
     ReleaseDiffBaseline { baseline_id: u64 },
 
-    /// Project-wide grep search (async)
-    /// Searches all project files via FileSystem trait, respecting .gitignore.
-    /// For open buffers with dirty edits, searches the buffer's piece tree.
     /// Discover agent sessions that other tools are running on this
     /// session's machine.
     ///
@@ -5651,6 +5648,9 @@ pub enum PluginCommand {
         allow_commands: bool,
         callback_id: JsCallbackId,
     },
+    /// Project-wide grep search (async)
+    /// Searches all project files via FileSystem trait, respecting .gitignore.
+    /// For open buffers with dirty edits, searches the buffer's piece tree.
     GrepProject {
         /// Which plugin asked. Coalescing is per plugin: a newer grep replaces
         /// that plugin's own in-flight one, and never another plugin's.

@@ -3391,21 +3391,6 @@ impl Editor {
         }
     }
 
-    /// Handle GrepProject: snapshot what only the editor thread can see, then
-    /// hand the walk-and-search to [`plugin_offloop::grep_project`].
-    ///
-    /// The project walk, the per-file greps and the callback resolution all
-    /// happen on the tokio runtime; a second grep from the same plugin
-    /// supersedes and cancels the first, so a plugin looping on `grepProject`
-    /// collapses instead of queueing.
-    ///
-    /// What stays on the editor thread is the snapshot, and it is not free:
-    /// `search_hybrid_plan` copies the loaded bytes of every *modified* open
-    /// buffer, because the piece tree cannot cross threads. Unmodified buffers
-    /// cost only their id, and unloaded regions of a modified one are recorded
-    /// as file offsets rather than copied — but a large fully-loaded dirty
-    /// buffer is copied in full, once per call. Worth knowing before adding
-    /// anything else to this path.
     /// Hand a session scan to the off-loop worker.
     ///
     /// The editor-thread half is deliberately trivial: name the machine, note
@@ -3461,6 +3446,21 @@ impl Editor {
         );
     }
 
+    /// Handle GrepProject: snapshot what only the editor thread can see, then
+    /// hand the walk-and-search to [`plugin_offloop::grep_project`].
+    ///
+    /// The project walk, the per-file greps and the callback resolution all
+    /// happen on the tokio runtime; a second grep from the same plugin
+    /// supersedes and cancels the first, so a plugin looping on `grepProject`
+    /// collapses instead of queueing.
+    ///
+    /// What stays on the editor thread is the snapshot, and it is not free:
+    /// `search_hybrid_plan` copies the loaded bytes of every *modified* open
+    /// buffer, because the piece tree cannot cross threads. Unmodified buffers
+    /// cost only their id, and unloaded regions of a modified one are recorded
+    /// as file offsets rather than copied — but a large fully-loaded dirty
+    /// buffer is copied in full, once per call. Worth knowing before adding
+    /// anything else to this path.
     pub(super) fn handle_grep_project(
         &mut self,
         plugin_name: String,
