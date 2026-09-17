@@ -526,6 +526,12 @@ impl Editor {
             crate::services::authority::Authority::local(trust, env),
         ));
         self.set_session_connection(active, connection);
+        // The terminals are `docker exec` shells still running inside the
+        // container this window has just left. Detaching without moving them
+        // would leave the window local while its shells stayed in a container
+        // the user thinks they have left — the same wrong-machine trap an
+        // attach has, in reverse.
+        self.move_window_terminals_to_its_authority(active);
         // The carrier the window was holding has no references left.
         self.prune_connections();
     }
