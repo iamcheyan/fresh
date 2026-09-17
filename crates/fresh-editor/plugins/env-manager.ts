@@ -266,7 +266,10 @@ editor.registerCommand("%cmd.status", "%cmd.status_desc", "env_status_handler");
  * subscription below.
  */
 function requestCoreTrustPrompt(): void {
-  editor.executeActions([{ action: "workspace_trust_prompt", count: 1 }]);
+  // `args` is required by the type even for a no-arg action: `ActionSpec`
+  // mirrors a Rust struct whose field is `#[serde(default)]`, which ts-rs
+  // renders as required rather than optional.
+  editor.executeActions([{ action: "workspace_trust_prompt", count: 1, args: {} }]);
 }
 
 /// Catch the devcontainer attach popup's outcome on the shared
