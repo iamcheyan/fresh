@@ -674,8 +674,6 @@ pub struct Editor {
     pending_escape_sequences: Vec<u8>,
 
     /// If set, the editor should restart with this new working directory
-    /// This is used by Open Folder to do a clean context switch
-    restart_with_dir: Option<PathBuf>,
 
     // status_message, plugin_status_message, prompt moved onto
     // `Window` (Step 0k phase 3) — each window has its own chrome,
@@ -786,24 +784,6 @@ pub struct Editor {
     // each window has its own tree view.
     // `preview` (per-window preview-tab tracker) moved onto `Window`.
     // Each window has its own preview slot.
-
-    // suppress_position_history_once moved onto `Window` (Step 0f).
-    // The file explorer and Open File browser ride per-window fs_managers
-    // (`WindowResources::fs_manager`, derived from each window's authority), so
-    // the editor no longer holds a global one that could go stale against the
-    // active authority.
-    // The editor's active backend is *not* a field here — it lives on the
-    // active `Window` (owned, non-`Clone`), read via `Editor::authority()`.
-    // Keeping it single-owned per window is what makes a session's
-    // backend/trust/env impossible to share into another window by
-    // construction (issue #2280).
-    /// Authority queued by `install_authority`, picked up by `main.rs`
-    /// right before dropping this editor on restart. `None` in the
-    /// steady state. Not durable state — restarts from `main.rs`'s
-    /// restart-dir path leave this `None`, and the main loop carries
-    /// the authority over through its own channel.
-    pending_authority: Option<Arc<crate::services::authority::Connection>>,
-
     /// Plugin-supplied override for the Remote Indicator. Takes
     /// precedence over the authority-derived state at render time.
     /// Cleared on editor restart (plugins must reassert the state

@@ -5816,11 +5816,11 @@ pub enum PluginCommand {
     /// `crates/fresh-editor/src/services/authority/mod.rs` for the
     /// canonical schema.
     ///
-    /// Fire-and-forget: the transition piggy-backs on the existing
-    /// editor restart flow, so the plugin that sent this command will
-    /// be re-loaded as part of the restart. Any follow-up work the
-    /// plugin wants to do after the switch belongs in its post-restart
-    /// init code, not in a callback here.
+    /// Fire-and-forget: the backend lands on the window showing the
+    /// current project, and this command returns before it does.
+    /// Nothing is torn down and the sending plugin is not reloaded, so
+    /// follow-up work belongs in an `authority_changed` handler, not in
+    /// a callback here.
     SetAuthority {
         #[ts(type = "unknown")]
         payload: JsonValue,

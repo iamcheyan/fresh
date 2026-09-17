@@ -463,59 +463,54 @@ impl Editor {
         self.status_log_path = Some(path);
     }
 
-    /// Queue a new authority and restart the editor.
+    /// Attach `authority` to the project the active window is showing.
     ///
-    /// Per the design decision in `docs/internal/AUTHORITY_DESIGN.md`,
-    /// authority transitions piggy-back on the existing
-    /// `change_working_dir` restart path. The caller never sees an
-    /// editor that is half-transitioned: the current `Editor` is
-    /// dropped, `main.rs` rebuilds a fresh one with the queued
-    /// authority, and session restore reopens buffers against the new
-    /// backend. This is slower than an in-place pointer swap but is
-    /// far more robust — every cached `Arc<dyn FileSystem>`, LSP
-    /// handle, terminal PTY, plugin state, and in-flight task is
-    /// dropped cleanly by the existing restart machinery.
+    /// This used to queue the authority and restart the whole editor — the
+    /// only way to swap a backend safely before windows owned their own. It
+    /// now does what a backend change actually is: the project opens in a
+    /// window on the new machine, or, if it is already open there, that window
+    /// is brought forward. Every other window keeps the machine it was on,
+    /// which is the point — attaching a container no longer takes the rest of
+    /// the editor with it.
+    ///
+    /// The plugin that asked is *not* reloaded, because nothing is torn down.
+    /// Follow-up work belongs in an `authority_changed` handler.
     pub fn install_authority(&mut self, authority: crate::services::authority::Authority) {
-        self.pending_authority =
-            Some(self.open_connection(crate::services::authority::Connection::plain(authority)));
-        // Re-open the same working directory; `main.rs` picks up the
-        // pending authority from the old editor just before dropping it.
-        self.request_restart(self.working_dir().to_path_buf());
+        let root = self.working_dir().to_path_buf();
+        let connection =
+            self.open_connection(crate::services::authority::Connection::plain(authority));
+        self.attach_connection_at(connection, root);
     }
 
-    /// Install a new authority that owns a live connection, parking its
-    /// keepalive bundle so the connection survives the restart.
+    /// Attach an authority that owns a live connection, at `working_dir`.
     ///
-    /// Remote-agent backends (SSH-style, K8s) hold carrier processes,
-    /// reconnect/heartbeat tasks, and a Tokio handle that must outlive
-    /// the `Editor` rebuild — exactly the role of the daemon's
-    /// `session_keepalive` slot. The restart loop pairs
-    /// The keepalive rides inside the connection, so `take_pending_authority`
-    /// carries it across the rebuild in one move and the previous connection
-    /// drops with its carrier. Opaque `Box<dyn Any + Send>` so core/main need
-    /// not name the backend.
+    /// Remote backends (SSH-style, K8s) hold carrier processes, reconnect and
+    /// heartbeat tasks and a Tokio handle; those ride inside the connection,
+    /// so the window that ends up on this machine owns them and the transport
+    /// closes when the last window using it does.
+    ///
+    /// Unlike [`Self::install_authority`] (which attaches at the *current*
+    /// root) a remote attach re-roots at the pod-side workspace — the local
+    /// path does not exist over there.
     pub fn install_authority_with_keepalive(
         &mut self,
         authority: crate::services::authority::Authority,
         keepalive: Box<dyn std::any::Any + Send>,
         working_dir: std::path::PathBuf,
     ) {
-        // Unlike `install_authority` (which re-opens the *current* working
-        // dir), a remote-agent attach must re-root the editor at the pod-side
-        // workspace — otherwise the explorer, quick-open, and open-file all
-        // operate on the local host path, which doesn't exist in the pod.
-        self.pending_authority = Some(self.open_connection(
-            crate::services::authority::Connection {
-                authority,
-                keepalive: std::sync::Mutex::new(Some(keepalive)),
-            },
-        ));
-        self.request_restart(working_dir);
+        let connection = self.open_connection(crate::services::authority::Connection {
+            authority,
+            keepalive: std::sync::Mutex::new(Some(keepalive)),
+        });
+        self.attach_connection_at(connection, working_dir);
     }
 
-    /// Restore the default local authority. Same destructive-restart
-    /// semantics as `install_authority` — the caller never observes a
-    /// half-transitioned editor.
+    /// Detach: put the active window back on a plain local backend.
+    ///
+    /// In place, not via [`Self::install_authority`]: detaching is about *this*
+    /// window returning to the host, and re-homing it onto some other window
+    /// that happens to share its root would lose the session the user is
+    /// looking at.
     pub fn clear_authority(&mut self) {
         // Reuse the editor's live trust handle so the restored local authority
         // is gated by the same workspace-trust state.
@@ -526,15 +521,13 @@ impl Editor {
         // backend the user explicitly left.
         self.active_window_mut().authority_spec =
             crate::services::authority::SessionAuthoritySpec::Local;
-        self.install_authority(crate::services::authority::Authority::local(trust, env));
-    }
-
-    /// Take the queued authority (if any). Called by `main.rs` on
-    /// restart to move the queued authority into the fresh editor.
-    pub fn take_pending_authority(
-        &mut self,
-    ) -> Option<std::sync::Arc<crate::services::authority::Connection>> {
-        self.pending_authority.take()
+        let active = self.active_window;
+        let connection = self.open_connection(crate::services::authority::Connection::plain(
+            crate::services::authority::Authority::local(trust, env),
+        ));
+        self.set_session_connection(active, connection);
+        // The carrier the window was holding has no references left.
+        self.prune_connections();
     }
 
     /// Directly replace the active authority without triggering a
@@ -845,10 +838,11 @@ impl Editor {
     }
 
     /// Move the active window's `Authority` out, leaving a local placeholder.
-    /// Used by the restart loops to carry the active session's backend into
-    /// the rebuilt editor across a *non-transition* restart — `Authority` is
-    /// non-`Clone`, so it must be moved. The editor is being torn down
-    /// immediately after, so the placeholder left behind is never observed.
+    /// Move the active window's connection out, leaving a local placeholder.
+    /// `Authority` is non-`Clone`, so a window that is handing its backend to
+    /// another window (Switch Project re-homing a remote session) has to give
+    /// it up rather than copy it; the placeholder stands in for the moment
+    /// between, and the old window is dropped immediately after.
     pub fn take_active_authority(
         &mut self,
     ) -> std::sync::Arc<crate::services::authority::Connection> {

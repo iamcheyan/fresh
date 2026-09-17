@@ -12,7 +12,7 @@
 //!
 //! | Severity | Bug | Test | CI status |
 //! |---|---|---|---|
-//! | Critical | After Rebuild with malformed `devcontainer.json`, all `Dev Container:` palette commands disappear from the registry and don't return when the JSON is fixed — the user must restart the editor to recover. | `dev_container_commands_persist_after_rebuild_with_broken_config` | `#[ignore]` — harness shortcuts the post-rebuild editor restart |
+//! | Critical | After Rebuild with malformed `devcontainer.json`, all `Dev Container:` palette commands disappear from the registry and don't return when the JSON is fixed — the user must restart the editor to recover. | `dev_container_commands_persist_after_rebuild_with_broken_config` | Fixed — an authority transition no longer reloads the plugin |
 //! | Medium | Palette popup renders nothing when the layout has many horizontal splits — the prompt accepts the filter text but no result list is drawn. | `palette_popup_renders_when_layout_has_many_splits` | `#[ignore]` — harness PTY is too tall to crowd the popup |
 //! | Low | Palette doesn't gate `Attach` by attach state — `Dev Container: Attach` is offered even while already attached. | `palette_attach_command_hidden_when_already_attached` | `#[test]` — fails on master |
 //!
@@ -157,10 +157,6 @@ fn attach_via_fake(harness: &mut EditorTestHarness) {
     let max_iters = 200;
     for _ in 0..max_iters {
         harness.tick_and_render().unwrap();
-        if let Some(auth) = harness.editor_mut().take_pending_authority() {
-            harness.editor_mut().set_boot_authority(auth);
-            return;
-        }
         if harness
             .editor()
             .authority()
@@ -189,22 +185,18 @@ fn attach_via_fake(harness: &mut EditorTestHarness) {
 /// left) — and **stays gone after the JSON is fixed**. The user has
 /// no in-editor recovery path; an editor restart is required.
 ///
-/// **Harness limitation.** The plugin's `registerCommands()` runs at
-/// startup; nothing in the attach lifecycle (`enterFailedAttach`,
-/// the popup, the rebuild flow) unregisters commands. The disappearance
-/// observed interactively therefore happens on the post-rebuild
-/// editor *restart* — `setAuthority` triggers a process replacement
-/// in `main.rs` that re-runs plugin loading against the now-broken
-/// JSON. The harness shortcuts that restart by calling
-/// `take_pending_authority` + `set_boot_authority` on the existing
-/// `Editor`, so the second plugin load never happens and the bug
-/// can't surface. Marking `#[ignore]` so CI doesn't claim this is
-/// fixed; lift the ignore once the harness grows a real restart
-/// hook (or once the plugin's reload path fails gracefully without
-/// dropping commands).
+/// **Why it cannot happen any more.** The plugin's `registerCommands()` runs at
+/// startup; nothing in the attach lifecycle (`enterFailedAttach`, the popup,
+/// the rebuild flow) unregisters commands. The disappearance observed
+/// interactively happened on the *restart* `setAuthority` used to trigger,
+/// which re-ran plugin loading against the now-broken JSON and lost the
+/// commands the failed load never registered. An authority now lands on a
+/// window and nothing is torn down, so there is no second plugin load to fail:
+/// the commands registered at startup are still registered. This ran under
+/// `#[ignore]` for as long as the harness could not reproduce the restart;
+/// it is a live regression guard now that there is no restart to reproduce.
 #[cfg(unix)]
 #[test]
-#[ignore = "harness shortcuts the post-rebuild editor restart; needs real restart support to repro"]
 fn dev_container_commands_persist_after_rebuild_with_broken_config() {
     let (_temp, workspace) = set_up_workspace();
     let mut harness = EditorTestHarness::create(
@@ -265,9 +257,6 @@ fn dev_container_commands_persist_after_rebuild_with_broken_config() {
     // own success.
     for _ in 0..200 {
         harness.tick_and_render().unwrap();
-        if let Some(auth) = harness.editor_mut().take_pending_authority() {
-            harness.editor_mut().set_boot_authority(auth);
-        }
         std::thread::sleep(Duration::from_millis(50));
         harness.advance_time(Duration::from_millis(50));
     }
@@ -721,9 +710,6 @@ fn rebuild_reuses_build_log_split_instead_of_stacking() {
     // *new* split.
     for _ in 0..200 {
         harness.tick_and_render().unwrap();
-        if let Some(auth) = harness.editor_mut().take_pending_authority() {
-            harness.editor_mut().set_boot_authority(auth);
-        }
         std::thread::sleep(Duration::from_millis(25));
         harness.advance_time(Duration::from_millis(25));
     }

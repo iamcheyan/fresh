@@ -7609,9 +7609,14 @@ impl JsEditorApi {
     /// The payload is a JS object describing filesystem + spawner +
     /// terminal wrapper + display label. The canonical schema lives in
     /// the `AuthorityPayload` type in `fresh-editor`; plugins should
-    /// hand-build objects that match it. Fire-and-forget: the editor
-    /// restarts as part of the transition, so the plugin is reloaded
-    /// before any follow-up work can run on this call's return value.
+    /// hand-build objects that match it.
+    ///
+    /// The backend lands on the window showing this project; every other
+    /// window keeps the machine it was on. Fire-and-forget: this queues a
+    /// command and returns before the authority is live, and nothing is
+    /// reloaded — so follow-up work belongs in an `authority_changed`
+    /// handler, not after this call. (It used to restart the editor, which
+    /// reloaded the calling plugin; that is no longer true.)
     #[plugin_api(js_name = "setAuthority")]
     pub fn set_authority(
         &self,
@@ -7625,8 +7630,9 @@ impl JsEditorApi {
         true
     }
 
-    /// Restore the default local authority. Same restart semantics as
-    /// `setAuthority`.
+    /// Restore the default local authority on this window. Same semantics as
+    /// `setAuthority`: queued, nothing is reloaded, and `authority_changed`
+    /// is where the transition is observed.
     #[plugin_api(js_name = "clearAuthority")]
     pub fn clear_authority(&self) {
         let _ = self.command_sender.send(PluginCommand::ClearAuthority);
@@ -7702,9 +7708,9 @@ impl JsEditorApi {
     /// ```
     ///
     /// The override sticks until replaced or cleared via
-    /// `clearRemoteIndicatorState`. Editor restart (e.g. on
-    /// `setAuthority`) resets it — plugins must reassert after a
-    /// post-restart init if they want the override to persist.
+    /// `clearRemoteIndicatorState`, and survives an authority change —
+    /// `setAuthority` no longer restarts the editor, so nothing resets it.
+    /// It does not survive a relaunch.
     #[plugin_api(js_name = "setRemoteIndicatorState")]
     pub fn set_remote_indicator_state(
         &self,

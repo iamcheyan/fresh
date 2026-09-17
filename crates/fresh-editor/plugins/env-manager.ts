@@ -277,8 +277,10 @@ function requestCoreTrustPrompt(): void {
 /// silently skip its popup that time).
 function onDevcontainerAttachResult(data: ActionPopupResultData): void {
   if (data.action_id === "attach") {
-    // editor.setAuthority restarts the editor; env-manager re-runs
-    // inside the container via the post-restart `plugins_loaded`.
+    // The attach re-points this window at the container and fires
+    // `authority_changed`, which brings us back through
+    // `env_auto_activate_on_session` — so env-manager runs inside the
+    // container without anything to do here.
     return;
   }
   devcontainerDismissedThisSession = true;
@@ -389,6 +391,12 @@ registerHandler("env_auto_activate_on_session", () => {
   if (!editor.envActive()) maybeAutoActivate();
 });
 editor.on("active_window_changed", "env_auto_activate_on_session");
+// A window that changes machine without changing identity — a devcontainer
+// attach, a detach, a remote reconnect — is the same session on a different
+// toolchain, and the environment has to be re-decided for it. Attaching no
+// longer restarts the editor, so `plugins_loaded` does not fire and this is
+// the only signal that it happened.
+editor.on("authority_changed", "env_auto_activate_on_session");
 
 // === Status pill (opt-in to a user's status-bar layout) ===
 //

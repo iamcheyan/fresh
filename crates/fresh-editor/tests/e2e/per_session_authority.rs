@@ -70,12 +70,16 @@ fn set_session_authority_on_active_window_updates_window_and_editor() -> anyhow:
     Ok(())
 }
 
+/// Stands in for a remote backend's carrier bundle: something the connection
+/// owns and drops with it.
+struct KeepaliveProbe;
+
+/// A remote attach installs its connection on the window for that root, and the
+/// connection carries the carrier that keeps it open. This used to queue the
+/// authority and restart the whole editor; the window is the transition now.
 #[test]
-fn install_authority_with_keepalive_queues_both_and_requests_restart() -> anyhow::Result<()> {
-    // The path the `attachRemoteAgent` op lands on once its async connect
-    // succeeds: a connection-backed authority is queued *alongside* its
-    // keepalive, and a restart is requested so both restart loops adopt them
-    // before the old editor is dropped.
+fn install_authority_with_keepalive_attaches_the_window_and_keeps_the_carrier() -> anyhow::Result<()>
+{
     let temp = tempfile::tempdir()?;
     let mut harness = EditorTestHarness::create(
         100,
@@ -83,34 +87,24 @@ fn install_authority_with_keepalive_queues_both_and_requests_restart() -> anyhow
         HarnessOptions::new().with_working_dir(temp.path().to_path_buf()),
     )?;
 
-    // A real attach would pass an `KubeKeepalive`; the slot is opaque
-    // `Box<dyn Any + Send>`, so any owned value exercises the wiring.
-    let keepalive: Box<dyn std::any::Any + Send> = Box::new(());
-    let remote_root = std::path::PathBuf::from("/workspace");
+    let root = temp.path().to_path_buf();
     harness.editor_mut().install_authority_with_keepalive(
         container_authority("Container:ka"),
-        keepalive,
-        remote_root.clone(),
+        Box::new(KeepaliveProbe),
+        root,
     );
 
-    // The connection is queued, and its carrier rides inside it rather than
-    // in a second slot that has to be kept in step with it.
-    let pending = harness
-        .editor_mut()
-        .take_pending_authority()
-        .expect("connection queued");
-    assert_eq!(pending.authority.display_label, "Container:ka");
-    assert!(
-        pending.keepalive.lock().expect("keepalive lock").is_some(),
-        "the queued connection carries its own keepalive"
-    );
-    // …and a restart was requested that re-roots the editor at the *remote*
-    // workspace (not the local working dir) — the fix for the explorer /
-    // quick-open / open-file all pointing at a host path absent in the pod.
     assert_eq!(
-        harness.editor_mut().take_restart_dir(),
-        Some(remote_root),
-        "restart re-roots at the remote workspace"
+        harness.editor_mut().authority().display_label,
+        "Container:ka",
+        "the attach lands on the window, with no restart in between"
+    );
+    assert!(
+        harness
+            .editor_mut()
+            .open_connection_labels()
+            .contains(&"Container:ka".to_string()),
+        "and the connection is registered like any other"
     );
     Ok(())
 }
@@ -580,7 +574,7 @@ fn activating_env_in_one_session_does_not_affect_another() -> anyhow::Result<()>
 /// no rebuild is needed. The old `handle_set_env` called `request_restart`,
 /// which rebuilds the whole editor process — dropping every window's
 /// `terminal_manager` (all orchestrator sessions' PTYs) and reconstructing the
-/// orchestrator plugin (closing the dock). Asserting `!should_restart()` after
+/// orchestrator plugin (closing the dock). Asserting `!should_quit()` after
 /// activation locks that out. Drives `PluginCommand::SetEnv` directly (what
 /// `editor.setEnv` dispatches) rather than poking the provider, so it covers
 /// the actual restart decision.
@@ -624,7 +618,7 @@ fn activating_env_does_not_restart_the_editor() -> anyhow::Result<()> {
         "env activated in place"
     );
     assert!(
-        !harness.editor().should_restart(),
+        !harness.editor().should_quit(),
         "activating an env must not request a process-wide editor restart \
          (a rebuild tears down other sessions' terminals and closes the dock)"
     );

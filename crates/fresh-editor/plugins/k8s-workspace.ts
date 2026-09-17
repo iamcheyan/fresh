@@ -479,10 +479,11 @@ async function connectWorkspace(): Promise<void> {
   editor.setGlobalState(SESSION_KEY, session as unknown);
 
   editor.setStatus(`K8s: attaching to ${coords.namespace}/${coords.pod}…`);
-  // Core connects asynchronously and restarts on success; this provider runs
-  // in restart (not window) mode, so there is no dialog to keep open. We don't
-  // await — but we must catch the rejection so a failed connect surfaces as a
-  // status message rather than an unhandled promise rejection.
+  // Core connects asynchronously and, on success, re-points this workspace's
+  // window at the pod (no editor restart, and no new window either — the
+  // session carries over). There is no dialog to keep open, so we don't await
+  // — but we must catch the rejection so a failed connect surfaces as a status
+  // message rather than an unhandled promise rejection.
   editor.attachRemoteAgent(spec).catch((e: unknown) => {
     editor.setStatus(`K8s: attach failed: ${e instanceof Error ? e.message : String(e)}`);
   });
@@ -491,7 +492,7 @@ async function connectWorkspace(): Promise<void> {
 async function disconnectWorkspace(): Promise<void> {
   const raw = editor.getGlobalState(SESSION_KEY) as ActiveSession | null;
 
-  // Detach the editor first (restores local authority via restart).
+  // Detach the editor first (puts this window back on a local authority).
   editor.clearAuthority();
 
   if (raw && raw.coords) {

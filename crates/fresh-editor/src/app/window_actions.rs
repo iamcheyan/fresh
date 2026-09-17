@@ -89,6 +89,60 @@ impl crate::app::Editor {
             .map(|(id, _)| *id)
     }
 
+    /// Attach `connection` to the project at `root`, and make it the active
+    /// window.
+    ///
+    /// This is what an authority transition *is*: not a new editor, a window.
+    /// The project already open at `root` is re-pointed at the new backend in
+    /// place — it keeps its buffers, splits and layout, and its terminals are
+    /// respawned through the machine it is now on. Otherwise the project opens
+    /// in a new window born under `connection`. Either way the windows that
+    /// were already there keep the machines they were on: attaching a
+    /// container no longer takes the rest of the editor with it.
+    pub(crate) fn attach_connection_at(
+        &mut self,
+        connection: std::sync::Arc<crate::services::authority::Connection>,
+        root: PathBuf,
+    ) -> WindowId {
+        let root = root.canonicalize().unwrap_or(root);
+        // The active window first, then any window at that root. Co-tenants
+        // share a root — a tab extracted into its own workspace, say — and
+        // `find_window_by_root` returns whichever it meets first, which would
+        // attach the backend to a window the user is not looking at.
+        let here = self.active_window;
+        let at_root = |editor: &Self, id: fresh_core::WindowId| {
+            editor.windows.get(&id).is_some_and(|w| {
+                crate::app::orchestrator_persistence::canonical_key(&w.root)
+                    == crate::app::orchestrator_persistence::canonical_key(&root)
+            })
+        };
+        let target = if at_root(self, here) {
+            Some(here)
+        } else {
+            self.find_window_by_root(&root)
+        };
+        let Some(existing) = target else {
+            let label = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.to_string_lossy().into_owned());
+            let id = self.create_window_with_authority(root, label, connection);
+            self.set_active_window(id);
+            return id;
+        };
+        self.set_session_connection(existing, connection);
+        // The terminals in this window were running on the machine it has just
+        // left; respawn them through the one it is on now.
+        self.reattach_window(existing);
+        if self.active_window != existing {
+            self.set_active_window(existing);
+        }
+        // The connection this window was on has no references left unless
+        // another window was sharing it.
+        self.prune_connections();
+        existing
+    }
+
     /// Open the window for `root`, creating it if absent. Enforces
     /// one-session-per-directory: if a window already exists at the
     /// same canonical root it is returned as-is and `label` is
