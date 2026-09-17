@@ -41,6 +41,7 @@ import type {
   ScanResult,
   Scanner,
   ScannerReport,
+  MachineSpec,
 } from "./lib/agent_scanner.ts";
 import { baseName } from "./lib/agent_scanner.ts";
 
@@ -166,7 +167,7 @@ function correlate(sessions: CollectedSession[]): Link[] {
   return links;
 }
 
-async function scan(spec: unknown | null, opts?: ScanOptions): Promise<ScanResult> {
+async function scan(spec: MachineSpec | null, opts?: ScanOptions): Promise<ScanResult> {
   const limit = opts?.maxSessionsPerTool ?? 200;
   const problems: string[] = [];
 

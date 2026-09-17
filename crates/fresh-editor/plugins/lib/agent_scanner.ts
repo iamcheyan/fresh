@@ -106,6 +106,11 @@ export interface ScanResult {
   problems: string[];
 }
 
+/** What `editor.openMachine` accepts: a window whose authority to borrow — the
+ *  only way to reach a genuinely remote machine — or a payload describing a
+ *  local or container backend to build. */
+export type MachineSpec = { kind: "window"; window?: number } | AuthorityPayload;
+
 export interface ScanOptions {
   /** Cap per scanner. These stores are unbounded — a year of daily use is
    *  tens of thousands of transcripts — and a picker wants the newest few. */
@@ -123,7 +128,7 @@ export interface AgentSessionsApi {
   registerScanner(scanner: Scanner): () => void;
   unregisterScanner(id: string): boolean;
   listScanners(): { id: string; displayName: string }[];
-  scan(spec: unknown | null, opts?: ScanOptions): Promise<ScanResult>;
+  scan(spec: MachineSpec | null, opts?: ScanOptions): Promise<ScanResult>;
 }
 
 /** The hub, or null when it is not loaded. */
