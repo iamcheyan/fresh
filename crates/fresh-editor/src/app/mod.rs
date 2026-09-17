@@ -844,15 +844,6 @@ pub struct Editor {
     /// "base") until the orchestrator adds more.
     pub(crate) windows: HashMap<fresh_core::WindowId, crate::app::window::Window>,
 
-    /// Connection keepalives for born-attached remote windows, keyed by
-    /// `WindowId`. A remote (Kubernetes / SSH / …) window's carrier process +
-    /// reconnect/heartbeat tasks + dedicated runtime live in this opaque
-    /// bundle; it must outlive the `Editor` rebuilds that *don't* drop the
-    /// window and is torn down when the window is closed (`close_window`).
-    /// Local windows have no entry. This is the per-window analogue of the
-    /// process-level keepalive the restart-based attach parks.
-    pub(crate) session_keepalives: HashMap<fresh_core::WindowId, Box<dyn std::any::Any + Send>>,
-
     /// Request ids of `attachRemoteAgent` connects currently in flight (added
     /// when the connect is spawned, removed when it settles). Lets a plugin
     /// cancel a pending connect (the New-Session dialog's Cancel).

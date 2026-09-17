@@ -663,21 +663,40 @@ impl Editor {
         }
     }
 
+    /// Re-point a window at a connection that holds no live transport — a
+    /// local or container backend nothing has to keep alive.
     pub fn set_session_authority(
         &mut self,
         window_id: fresh_core::WindowId,
         authority: crate::services::authority::Authority,
     ) {
+        self.set_session_connection(
+            window_id,
+            std::sync::Arc::new(crate::services::authority::Connection::plain(authority)),
+        );
+    }
+
+    /// Re-point a window at `connection`.
+    ///
+    /// The connection carries its own keepalive, so a reconnect installs the
+    /// rebuilt backend and the carrier holding it open in one move; there is
+    /// no second map to remember to update. Windows sharing a machine share
+    /// the `Arc`, and the transport closes when the last of them lets go.
+    pub fn set_session_connection(
+        &mut self,
+        window_id: fresh_core::WindowId,
+        connection: std::sync::Arc<crate::services::authority::Connection>,
+    ) {
         let is_active = self.active_window == window_id;
         if let Some(w) = self.windows.get_mut(&window_id) {
-            // Re-point this window's LSP backend, then **move** the authority
-            // into the window it owns (single owner — never cloned).
+            // Re-point this window's LSP backend, then hand the window the
+            // connection it reads through from here on.
+            let authority = &connection.authority;
             let lsp = &mut w.lsp;
             lsp.set_long_running_spawner(authority.long_running_spawner.clone());
             lsp.set_path_translation(authority.path_translation.clone());
             lsp.set_workspace_trust(authority.workspace_trust.clone());
-            w.connection =
-                std::sync::Arc::new(crate::services::authority::Connection::plain(authority));
+            w.connection = connection;
         }
         if is_active {
             // The active backend *is* this window's authority now — re-point
@@ -697,6 +716,16 @@ impl Editor {
                 );
             }
         }
+    }
+
+    /// Whether `window_id` holds a live connection — a carrier process and the
+    /// reconnect tasks that keep it open — rather than a plain local backend or
+    /// a dormant session's disconnected shell. This is what tells a live remote
+    /// window from a dormant one.
+    pub(crate) fn window_connection_is_live(&self, window_id: fresh_core::WindowId) -> bool {
+        self.windows
+            .get(&window_id)
+            .is_some_and(|w| w.connection.keepalive.lock().is_ok_and(|k| k.is_some()))
     }
 
     /// Adopt the now-active window's authority into the editor-wide caches,

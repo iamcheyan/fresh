@@ -332,11 +332,11 @@ impl Editor {
                     root: normalize_plugin_path(s.root.clone()),
                     project_path: normalize_plugin_path(project_path),
                     shared_worktree,
-                    // A parked keepalive is what distinguishes a live remote
+                    // A live connection is what distinguishes a live remote
                     // window from a dormant one's disconnected shell.
                     remote: s
                         .authority_spec
-                        .remote_backend_info(self.session_keepalives.contains_key(&s.id)),
+                        .remote_backend_info(self.window_connection_is_live(s.id)),
                 }
             })
             .collect();
@@ -4559,7 +4559,10 @@ impl Editor {
         // passes its connected authority. `resume` is the agent-resume argv
         // carried through to the new session's terminal. The new local
         // session gets its own per-session trust scoped to its root.
-        let new_authority = self.local_session_authority(&root);
+        // A local backend holds nothing open, so it is a plain connection.
+        let new_connection = std::sync::Arc::new(crate::services::authority::Connection::plain(
+            self.local_session_authority(&root),
+        ));
         // Only adopt an id that really is a placeholder: anything else would
         // mean silently tearing down a live workspace to reuse its number.
         let adopt = adopt_window.filter(|id| self.preparing_windows.contains_key(id));
@@ -4569,7 +4572,7 @@ impl Editor {
             cwd_buf,
             command,
             title,
-            new_authority,
+            new_connection,
             resume,
             env,
             allow_script,
@@ -4966,10 +4969,10 @@ impl Editor {
     /// Idempotent: a reconnect already in flight for this window is a no-op.
     pub(crate) fn reconnect_dormant_session_if_needed(&mut self, window_id: fresh_core::WindowId) {
         // The *activate* path (diving into a session). A live session already
-        // holds its connection (keepalive), so leave it alone here — switching
-        // to an already-connected window must not tear down and rebuild it. A
-        // local session has nothing to reconnect.
-        if self.session_keepalives.contains_key(&window_id) {
+        // holds its connection, so leave it alone here — switching to an
+        // already-connected window must not tear down and rebuild it. A local
+        // session has nothing to reconnect.
+        if self.window_connection_is_live(window_id) {
             return;
         }
         // A session still descriptor-backed in `dormant_remote` (its window,

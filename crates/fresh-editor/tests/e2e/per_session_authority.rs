@@ -269,7 +269,9 @@ fn new_local_session_is_born_with_its_own_local_authority() -> anyhow::Result<()
             Some(proj_b.clone()),
             Some(vec!["sh".into(), "-c".into(), "sleep 60".into()]),
             Some("agent".into()),
-            born_authority,
+            std::sync::Arc::new(fresh::services::authority::Connection::plain(
+                born_authority,
+            )),
             None,
             None,
             false,

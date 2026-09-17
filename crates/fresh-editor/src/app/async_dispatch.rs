@@ -1574,9 +1574,11 @@ impl Editor {
                 // exists. Resolve on success; on a window-creation
                 // failure reject so the plugin keeps its dialog
                 // open with the reason and no half-built window.
-                match self
-                    .create_remote_session_window(authority, keepalive, root, label, command, spec)
-                {
+                let connection = std::sync::Arc::new(crate::services::authority::Connection {
+                    authority,
+                    keepalive: std::sync::Mutex::new(Some(keepalive)),
+                });
+                match self.create_remote_session_window(connection, root, label, command, spec) {
                     Ok(_) => self.resolve_remote_attach(request_id),
                     Err(e) => self.reject_remote_attach(request_id, e),
                 }
@@ -1594,7 +1596,13 @@ impl Editor {
                         "Promoting dormant remote session {window_id} ({})",
                         authority.display_label
                     );
-                    self.promote_dormant_remote(window_id, authority, keepalive);
+                    self.promote_dormant_remote(
+                        window_id,
+                        std::sync::Arc::new(crate::services::authority::Connection {
+                            authority,
+                            keepalive: std::sync::Mutex::new(Some(keepalive)),
+                        }),
+                    );
                 } else if self.windows.contains_key(&window_id) {
                     tracing::info!(
                         "Reconnected dormant session {window_id} ({})",
@@ -1607,8 +1615,13 @@ impl Editor {
                     // authority. The silent hot-swap path keeps the existing
                     // authority and reaches the same `reattach_window` via
                     // `AsyncMessage::RemoteReconnected`.
-                    self.set_session_authority(window_id, authority);
-                    self.session_keepalives.insert(window_id, keepalive);
+                    self.set_session_connection(
+                        window_id,
+                        std::sync::Arc::new(crate::services::authority::Connection {
+                            authority,
+                            keepalive: std::sync::Mutex::new(Some(keepalive)),
+                        }),
+                    );
                     self.reattach_window(window_id);
                 } else {
                     // The window was closed while the connect was in

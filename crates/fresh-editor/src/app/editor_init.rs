@@ -602,7 +602,6 @@ impl Editor {
             windows: parts.windows,
             dormant_remote: parts.dormant_remote,
             preparing_windows: std::collections::HashMap::new(),
-            session_keepalives: HashMap::new(),
             remote_attach_inflight: std::collections::HashSet::new(),
             remote_attach_cancelled: std::collections::HashSet::new(),
             remote_attach_cancels: std::collections::HashMap::new(),
