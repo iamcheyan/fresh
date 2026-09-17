@@ -1403,7 +1403,12 @@ mod integration_tests {
                 .clone();
 
             server
-                .rebuild_editor(None, Some(new_auth), None)
+                .rebuild_editor(
+                    None,
+                    Some(std::sync::Arc::new(
+                        crate::services::authority::Connection::plain(new_auth),
+                    )),
+                )
                 .map_err(|e| format!("rebuild_editor: {e}"))?;
 
             // After rebuild: new editor exists, carries the new label.
@@ -1484,7 +1489,7 @@ mod integration_tests {
                 .map_err(|e| format!("initialize_editor: {e}"))?;
 
             server
-                .rebuild_editor(Some(dir_b_clone.clone()), None, None)
+                .rebuild_editor(Some(dir_b_clone.clone()), None)
                 .map_err(|e| format!("rebuild_editor: {e}"))?;
 
             let editor = server.editor().expect("editor after rebuild");
@@ -1584,7 +1589,9 @@ mod integration_tests {
             dir_context,
             plugins_enabled: false,
             init_enabled: false,
-            startup_authority: Some(startup_auth),
+            startup_authority: Some(std::sync::Arc::new(
+                crate::services::authority::Connection::plain(startup_auth),
+            )),
             workspace_trust: std::sync::Arc::new(
                 crate::services::workspace_trust::WorkspaceTrust::permissive(),
             ),

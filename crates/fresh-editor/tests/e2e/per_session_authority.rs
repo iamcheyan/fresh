@@ -93,16 +93,16 @@ fn install_authority_with_keepalive_queues_both_and_requests_restart() -> anyhow
         remote_root.clone(),
     );
 
-    // The authority is queued…
-    let pending = harness.editor_mut().take_pending_authority();
-    assert_eq!(
-        pending.expect("authority queued").display_label,
-        "Container:ka"
-    );
-    // …so is the keepalive…
+    // The connection is queued, and its carrier rides inside it rather than
+    // in a second slot that has to be kept in step with it.
+    let pending = harness
+        .editor_mut()
+        .take_pending_authority()
+        .expect("connection queued");
+    assert_eq!(pending.authority.display_label, "Container:ka");
     assert!(
-        harness.editor_mut().take_pending_keepalive().is_some(),
-        "keepalive queued alongside the authority"
+        pending.keepalive.lock().expect("keepalive lock").is_some(),
+        "the queued connection carries its own keepalive"
     );
     // …and a restart was requested that re-roots the editor at the *remote*
     // workspace (not the local working dir) — the fix for the explorer /
@@ -247,9 +247,9 @@ fn new_local_session_is_born_with_its_own_local_authority() -> anyhow::Result<()
     // authority — exactly the state after `editor.setAuthority(...)` +
     // restart, which `set_boot_authority` mirrors inline.
     let owner = harness.editor_mut().active_window_id();
-    harness
-        .editor_mut()
-        .set_boot_authority(container_authority("Container:dc"));
+    harness.editor_mut().set_boot_authority(std::sync::Arc::new(
+        fresh::services::authority::Connection::plain(container_authority("Container:dc")),
+    ));
     assert_eq!(
         harness.editor_mut().authority().display_label,
         "Container:dc"
@@ -334,9 +334,9 @@ fn attach_does_not_leak_authority_onto_background_windows() -> anyhow::Result<()
         .create_window_at(bg_root, "projB".into());
 
     // Attach a devcontainer to the active project.
-    harness
-        .editor_mut()
-        .set_boot_authority(container_authority("Container:dc"));
+    harness.editor_mut().set_boot_authority(std::sync::Arc::new(
+        fresh::services::authority::Connection::plain(container_authority("Container:dc")),
+    ));
 
     // The owner runs under the container; the background project does not.
     assert_eq!(

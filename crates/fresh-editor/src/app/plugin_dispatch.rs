@@ -207,7 +207,7 @@ impl Editor {
             )> = self
                 .windows
                 .iter()
-                .map(|(id, w)| (*id, std::sync::Arc::clone(&w.authority.filesystem)))
+                .map(|(id, w)| (*id, std::sync::Arc::clone(&w.authority().filesystem)))
                 .collect();
             registry.rebuild(active, entries);
         }

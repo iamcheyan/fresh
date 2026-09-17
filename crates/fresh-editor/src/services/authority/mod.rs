@@ -280,6 +280,40 @@ fn default_true() -> bool {
 /// another window — that isolation is enforced by the type system, not a
 /// runtime check (issue #2280). It is *moved* between slots
 /// (`set_session_authority`, `set_boot_authority`, restore), never copied.
+/// An open connection to a machine: the backend, and whatever keeps it alive.
+///
+/// The keepalive lives *here*, beside the authority it keeps alive, rather
+/// than in a parallel map keyed by window — so a connection has one lifetime
+/// instead of two that have to be kept in step, and dropping the last
+/// reference tears the carrier down.
+///
+/// Shared by `Arc`: a window references the connection it is attached to, and
+/// so does anything reading that machine (a session scan). Two windows never
+/// reference the same one — each attach connects its own, with its own trust
+/// and env (issue #2280).
+pub struct Connection {
+    pub authority: Authority,
+    /// Carrier process, reconnect/heartbeat tasks and dedicated runtime for a
+    /// connection-backed authority. `None` for the synchronously built ones
+    /// (local, docker), which have nothing to keep alive.
+    ///
+    /// Behind a `Mutex` only so the connection as a whole is `Sync`: the
+    /// bundle is `Send` but not `Sync`, and a connection is shared by `Arc`
+    /// across threads. Nothing contends on it — it is held for its `Drop`.
+    pub keepalive: std::sync::Mutex<Option<Box<dyn std::any::Any + Send>>>,
+}
+
+impl Connection {
+    /// A connection with nothing to keep alive — local and container
+    /// backends, which are built synchronously and hold no carrier.
+    pub fn plain(authority: Authority) -> Self {
+        Self {
+            authority,
+            keepalive: std::sync::Mutex::new(None),
+        }
+    }
+}
+
 pub struct Authority {
     pub filesystem: Arc<dyn FileSystem + Send + Sync>,
     pub process_spawner: Arc<dyn ProcessSpawner>,

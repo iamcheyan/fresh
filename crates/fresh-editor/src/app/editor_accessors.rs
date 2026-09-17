@@ -476,7 +476,9 @@ impl Editor {
     /// handle, terminal PTY, plugin state, and in-flight task is
     /// dropped cleanly by the existing restart machinery.
     pub fn install_authority(&mut self, authority: crate::services::authority::Authority) {
-        self.pending_authority = Some(authority);
+        self.pending_authority = Some(std::sync::Arc::new(
+            crate::services::authority::Connection::plain(authority),
+        ));
         // Re-open the same working directory; `main.rs` picks up the
         // pending authority from the old editor just before dropping it.
         self.request_restart(self.working_dir().to_path_buf());
@@ -489,10 +491,10 @@ impl Editor {
     /// reconnect/heartbeat tasks, and a Tokio handle that must outlive
     /// the `Editor` rebuild — exactly the role of the daemon's
     /// `session_keepalive` slot. The restart loop pairs
-    /// `take_pending_authority` with `take_pending_keepalive` and moves
-    /// the bundle into the process-/server-level keepalive, dropping the
-    /// previous one (tearing down the prior connection). Opaque
-    /// `Box<dyn Any + Send>` so core/main need not name the backend.
+    /// The keepalive rides inside the connection, so `take_pending_authority`
+    /// carries it across the rebuild in one move and the previous connection
+    /// drops with its carrier. Opaque `Box<dyn Any + Send>` so core/main need
+    /// not name the backend.
     pub fn install_authority_with_keepalive(
         &mut self,
         authority: crate::services::authority::Authority,
@@ -503,8 +505,12 @@ impl Editor {
         // dir), a remote-agent attach must re-root the editor at the pod-side
         // workspace — otherwise the explorer, quick-open, and open-file all
         // operate on the local host path, which doesn't exist in the pod.
-        self.pending_keepalive = Some(keepalive);
-        self.pending_authority = Some(authority);
+        self.pending_authority = Some(std::sync::Arc::new(
+            crate::services::authority::Connection {
+                authority,
+                keepalive: std::sync::Mutex::new(Some(keepalive)),
+            },
+        ));
         self.request_restart(working_dir);
     }
 
@@ -526,16 +532,10 @@ impl Editor {
 
     /// Take the queued authority (if any). Called by `main.rs` on
     /// restart to move the queued authority into the fresh editor.
-    pub fn take_pending_authority(&mut self) -> Option<crate::services::authority::Authority> {
+    pub fn take_pending_authority(
+        &mut self,
+    ) -> Option<std::sync::Arc<crate::services::authority::Connection>> {
         self.pending_authority.take()
-    }
-
-    /// Take the keepalive bundle queued alongside a pending authority by
-    /// [`Self::install_authority_with_keepalive`]. Called by the restart
-    /// loop right beside `take_pending_authority` so the new connection's
-    /// carrier/tasks are parked before the old `Editor` is dropped.
-    pub fn take_pending_keepalive(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
-        self.pending_keepalive.take()
     }
 
     /// Directly replace the active authority without triggering a
@@ -549,7 +549,10 @@ impl Editor {
     /// after `set_boot_authority`) see the real `authority_label` instead
     /// of the empty string the temporary `Authority::local()` carried
     /// during construction.
-    pub fn set_boot_authority(&mut self, authority: crate::services::authority::Authority) {
+    pub fn set_boot_authority(
+        &mut self,
+        connection: std::sync::Arc<crate::services::authority::Connection>,
+    ) {
         // The installed authority belongs to the *active/owning* session only
         // — the backend for the working-dir project the attach (or
         // `fresh user@host` launch) re-rooted at. Background windows are
@@ -565,35 +568,41 @@ impl Editor {
             .filter(|(id, _)| **id != active_id)
             .map(|(id, w)| (*id, w.root.clone()))
             .collect();
-        // (root → fresh local authority) for every background window.
-        let mut installs: Vec<(fresh_core::WindowId, crate::services::authority::Authority)> =
-            bg_roots
-                .into_iter()
-                .map(|(id, root)| {
-                    (
-                        id,
+        // (root → its own fresh local connection) for every background window.
+        let mut installs: Vec<(
+            fresh_core::WindowId,
+            std::sync::Arc<crate::services::authority::Connection>,
+        )> = bg_roots
+            .into_iter()
+            .map(|(id, root)| {
+                (
+                    id,
+                    std::sync::Arc::new(crate::services::authority::Connection::plain(
                         crate::services::authority::Authority::local_scoped(
                             self.session_scope_for(&root),
                         ),
-                    )
-                })
-                .collect();
-        installs.push((active_id, authority));
-        // Re-point each window's LSP backend, then **move** the authority into
-        // the window (single owner — never cloned).
-        for (id, a) in installs {
+                    )),
+                )
+            })
+            .collect();
+        installs.push((active_id, connection));
+        // Re-point each window's LSP backend, then give the window its
+        // connection. Each is its own — background windows never reference the
+        // active one's.
+        for (id, connection) in installs {
             if let Some(w) = self.windows.get_mut(&id) {
+                let a = &connection.authority;
                 w.lsp
                     .set_long_running_spawner(a.long_running_spawner.clone());
                 w.lsp.set_path_translation(a.path_translation.clone());
                 w.lsp.set_workspace_trust(a.workspace_trust.clone());
-                w.authority = a;
+                w.connection = std::sync::Arc::clone(&connection);
             }
         }
         // Re-point quick-open's file provider at the now-active backend (the
         // provider captured the previous authority's filesystem + spawner).
         let (fs, sp) = {
-            let a = &self.active_window().authority;
+            let a = &self.active_window().authority();
             (a.filesystem.clone(), a.process_spawner.clone())
         };
         self.quick_open_registry.set_file_backends(fs, sp);
@@ -602,7 +611,7 @@ impl Editor {
             self.update_plugin_state_snapshot();
             // Notify plugins so they can re-register state-gated commands
             // (e.g. devcontainer `Attach` only when not attached).
-            let label = self.active_window().authority.display_label.clone();
+            let label = self.active_window().authority().display_label.clone();
             self.plugin_manager.read().unwrap().run_hook(
                 "authority_changed",
                 crate::services::plugins::hooks::HookArgs::AuthorityChanged { label },
@@ -667,20 +676,21 @@ impl Editor {
             lsp.set_long_running_spawner(authority.long_running_spawner.clone());
             lsp.set_path_translation(authority.path_translation.clone());
             lsp.set_workspace_trust(authority.workspace_trust.clone());
-            w.authority = authority;
+            w.connection =
+                std::sync::Arc::new(crate::services::authority::Connection::plain(authority));
         }
         if is_active {
             // The active backend *is* this window's authority now — re-point
             // quick-open's file provider at it (same stale-capture fix).
             let (fs, sp) = {
-                let a = &self.active_window().authority;
+                let a = &self.active_window().authority();
                 (a.filesystem.clone(), a.process_spawner.clone())
             };
             self.quick_open_registry.set_file_backends(fs, sp);
             #[cfg(feature = "plugins")]
             {
                 self.update_plugin_state_snapshot();
-                let label = self.active_window().authority.display_label.clone();
+                let label = self.active_window().authority().display_label.clone();
                 self.plugin_manager.read().unwrap().run_hook(
                     "authority_changed",
                     crate::services::plugins::hooks::HookArgs::AuthorityChanged { label },
@@ -704,10 +714,10 @@ impl Editor {
     /// cheap and the status bar doesn't flicker.
     pub(crate) fn adopt_active_window_authority(&mut self, previous_label: &str) {
         // No editor-wide copy to update — the active backend *is*
-        // `active_window().authority`. Re-point quick-open at it and fire the
+        // `active_window().authority()`. Re-point quick-open at it and fire the
         // hook when the label actually changed.
         let (label_changed, fs, sp) = {
-            let a = &self.active_window().authority;
+            let a = &self.active_window().authority();
             (
                 a.display_label != previous_label,
                 a.filesystem.clone(),
@@ -719,7 +729,7 @@ impl Editor {
             #[cfg(feature = "plugins")]
             {
                 self.update_plugin_state_snapshot();
-                let label = self.active_window().authority.display_label.clone();
+                let label = self.active_window().authority().display_label.clone();
                 self.plugin_manager.read().unwrap().run_hook(
                     "authority_changed",
                     crate::services::plugins::hooks::HookArgs::AuthorityChanged { label },
@@ -734,7 +744,7 @@ impl Editor {
         // there is no separate editor-wide copy. Each window owns its
         // authority outright (no `Clone`), so a session's backend/trust/env
         // can never be shared into another window (issue #2280).
-        &self.active_window().authority
+        &self.active_window().authority()
     }
 
     /// Move the active window's `Authority` out, leaving a local placeholder.
@@ -742,12 +752,16 @@ impl Editor {
     /// the rebuilt editor across a *non-transition* restart — `Authority` is
     /// non-`Clone`, so it must be moved. The editor is being torn down
     /// immediately after, so the placeholder left behind is never observed.
-    pub fn take_active_authority(&mut self) -> crate::services::authority::Authority {
-        let placeholder = crate::services::authority::Authority::local(
-            std::sync::Arc::new(crate::services::workspace_trust::WorkspaceTrust::permissive()),
-            std::sync::Arc::new(crate::services::env_provider::EnvProvider::inactive()),
-        );
-        std::mem::replace(&mut self.active_window_mut().authority, placeholder)
+    pub fn take_active_authority(
+        &mut self,
+    ) -> std::sync::Arc<crate::services::authority::Connection> {
+        let placeholder = std::sync::Arc::new(crate::services::authority::Connection::plain(
+            crate::services::authority::Authority::local(
+                std::sync::Arc::new(crate::services::workspace_trust::WorkspaceTrust::permissive()),
+                std::sync::Arc::new(crate::services::env_provider::EnvProvider::inactive()),
+            ),
+        ));
+        std::mem::replace(&mut self.active_window_mut().connection, placeholder)
     }
 
     /// Run a blocking effect (filesystem writes/deletes, teardown I/O) off

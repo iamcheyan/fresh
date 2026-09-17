@@ -793,15 +793,7 @@ pub struct Editor {
     /// steady state. Not durable state — restarts from `main.rs`'s
     /// restart-dir path leave this `None`, and the main loop carries
     /// the authority over through its own channel.
-    pending_authority: Option<crate::services::authority::Authority>,
-
-    /// Keepalive bundle queued alongside `pending_authority` for a
-    /// connection-backed authority (remote agent / K8s), parked by the
-    /// restart loop so the live carrier + reconnect/heartbeat tasks
-    /// survive the rebuild. `None` for synchronously-constructible
-    /// authorities (local, docker). See
-    /// [`Editor::install_authority_with_keepalive`].
-    pending_keepalive: Option<Box<dyn std::any::Any + Send>>,
+    pending_authority: Option<Arc<crate::services::authority::Connection>>,
 
     /// Plugin-supplied override for the Remote Indicator. Takes
     /// precedence over the authority-derived state at render time.

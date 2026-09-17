@@ -53,7 +53,7 @@ pub struct EditorServerConfig {
     /// forms construct an `Authority::ssh(...)` and pass it here so
     /// the daemon boots already attached to the remote host.  Plugins
     /// can still replace this post-boot via `setAuthority`.
-    pub startup_authority: Option<crate::services::authority::Authority>,
+    pub startup_authority: Option<std::sync::Arc<crate::services::authority::Connection>>,
     /// Workspace Trust handle, created by the caller (`main.rs`) before the
     /// startup authority so the same `Arc` backs both the authority's spawners
     /// and the server. Mandatory: every spawner holds it, so there's no
@@ -111,7 +111,7 @@ pub struct EditorServer {
     /// is built with this authority in effect, and clients stay
     /// connected the whole time. Starts as
     /// `config.startup_authority.unwrap_or_else(Authority::local)`.
-    current_authority: crate::services::authority::Authority,
+    current_authority: std::sync::Arc<crate::services::authority::Connection>,
     /// Workspace Trust state, gating process execution. Held here (not on
     /// the `Editor`) so the chosen level survives editor rebuilds. Shared
     /// by `Arc` into the authority's guarding spawners on every build via
@@ -240,10 +240,12 @@ impl EditorServer {
         // A missing startup authority defaults to a local one carrying the
         // same trust + env handles.
         let current_authority = config.startup_authority.take().unwrap_or_else(|| {
-            crate::services::authority::Authority::local(
-                Arc::clone(&workspace_trust),
-                Arc::clone(&env_provider),
-            )
+            std::sync::Arc::new(crate::services::authority::Connection::plain(
+                crate::services::authority::Authority::local(
+                    Arc::clone(&workspace_trust),
+                    Arc::clone(&env_provider),
+                ),
+            ))
         });
         let session_keepalive = config.session_keepalive.take();
 
@@ -425,18 +427,15 @@ impl EditorServer {
             // attached; otherwise this is a real shutdown.
             if let Some(ref mut editor) = self.editor {
                 if editor.should_quit() {
-                    let pending_authority = editor.take_pending_authority();
-                    let pending_keepalive = editor.take_pending_keepalive();
+                    let pending_connection = editor.take_pending_authority();
                     let restart_dir = editor.take_restart_dir();
-                    if pending_authority.is_some() || restart_dir.is_some() {
+                    if pending_connection.is_some() || restart_dir.is_some() {
                         tracing::info!(
                             "Session rebuild requested (authority={}, dir={})",
-                            pending_authority.is_some(),
+                            pending_connection.is_some(),
                             restart_dir.is_some()
                         );
-                        if let Err(e) =
-                            self.rebuild_editor(restart_dir, pending_authority, pending_keepalive)
-                        {
+                        if let Err(e) = self.rebuild_editor(restart_dir, pending_connection) {
                             tracing::error!("Session rebuild failed, shutting down: {}", e);
                             self.shutdown.store(true, Ordering::SeqCst);
                             continue;
@@ -831,17 +830,19 @@ impl EditorServer {
             self.config.dir_context.clone(),
             self.config.plugins_enabled,
             color_capability,
-            // `Authority` is single-owner (non-`Clone`): move the current one
-            // into the rebuilt editor, leaving a local placeholder behind. A
-            // real authority transition overwrites it just below; otherwise
+            // Move the current connection into the rebuilt editor, leaving a
+            // local placeholder behind. A real authority transition
+            // overwrites it just below; otherwise
             // each window's own backend spec drives restore/reconnect, so the
             // placeholder only governs the active window until it reconnects.
             std::mem::replace(
                 &mut self.current_authority,
-                crate::services::authority::Authority::local(
-                    std::sync::Arc::clone(&self.workspace_trust),
-                    std::sync::Arc::clone(&self.env_provider),
-                ),
+                std::sync::Arc::new(crate::services::authority::Connection::plain(
+                    crate::services::authority::Authority::local(
+                        std::sync::Arc::clone(&self.workspace_trust),
+                        std::sync::Arc::clone(&self.env_provider),
+                    ),
+                )),
             ),
             false,
         )
@@ -979,8 +980,7 @@ impl EditorServer {
     pub(crate) fn rebuild_editor(
         &mut self,
         new_working_dir: Option<PathBuf>,
-        new_authority: Option<crate::services::authority::Authority>,
-        new_keepalive: Option<Box<dyn std::any::Any + Send>>,
+        new_connection: Option<std::sync::Arc<crate::services::authority::Connection>>,
     ) -> io::Result<()> {
         // Flush buffer saves + workspace before dropping the old editor,
         // mirroring the standalone exit path.  On failure we log and
@@ -1003,8 +1003,8 @@ impl EditorServer {
         // active workspace's own backend forward by moving it out of the old
         // editor, so a remote workspace isn't dropped to the local placeholder
         // `build_editor_instance` leaves behind. A real authority transition
-        // (`new_authority`) overwrites `current_authority` just below.
-        if new_authority.is_none() {
+        // (`new_connection`) overwrites `current_authority` just below.
+        if new_connection.is_none() {
             if let Some(ref mut editor) = self.editor {
                 self.current_authority = editor.take_active_authority();
             }
@@ -1027,7 +1027,7 @@ impl EditorServer {
             self.workspace_trust.set_store(Some(
                 crate::services::workspace_trust::store_for_workspace(
                     &self.config.dir_context,
-                    self.current_authority.filesystem.as_ref(),
+                    self.current_authority.authority.filesystem.as_ref(),
                     &self.config.working_dir,
                 ),
             ));
@@ -1035,20 +1035,16 @@ impl EditorServer {
             // and let the env-manager plugin re-detect for the new workspace.
             self.env_provider.clear();
         }
-        if let Some(auth) = new_authority {
+        // The connection carries whatever keeps it alive, so adopting it
+        // brings the carrier + reconnect/heartbeat tasks across the rebuild in
+        // one move; the previous connection drops, tearing down any prior
+        // remote backend. A local/docker transition carries no carrier.
+        if let Some(connection) = new_connection {
             tracing::info!(
                 "Rebuild: installing authority with label {:?}",
-                auth.display_label
+                connection.authority.display_label
             );
-            self.current_authority = auth;
-        }
-        // Adopt the keepalive that rode with a connection-backed authority
-        // (remote agent / K8s) so its carrier + reconnect/heartbeat tasks
-        // survive the rebuild; the previous keepalive drops, tearing down
-        // any prior remote backend. A local/docker transition carries
-        // none, leaving the current workspace untouched.
-        if let Some(keepalive) = new_keepalive {
-            self.session_keepalive = Some(keepalive);
+            self.current_authority = connection;
         }
 
         let (mut editor, terminal) = self.build_editor_instance()?;

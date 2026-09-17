@@ -112,7 +112,13 @@ impl crate::app::Editor {
         // session's authority/trust (which would leak a trust decision across
         // projects). Its `fs_manager` rides the same (host) filesystem.
         let local_authority = self.local_session_authority(&root);
-        self.create_window_with_authority(root, label, local_authority)
+        self.create_window_with_authority(
+            root,
+            label,
+            std::sync::Arc::new(crate::services::authority::Connection::plain(
+                local_authority,
+            )),
+        )
     }
 
     /// Number of live windows whose canonical root matches `root` — the size
@@ -162,7 +168,11 @@ impl crate::app::Editor {
         // per-session trust/env). For a local source that IS the final backend;
         // for a remote source it is a placeholder the reconnect re-points.
         let authority = self.local_session_authority(&root);
-        let id = self.create_window_with_authority(root, label, authority);
+        let id = self.create_window_with_authority(
+            root,
+            label,
+            std::sync::Arc::new(crate::services::authority::Connection::plain(authority)),
+        );
         if let Some(w) = self.windows.get_mut(&id) {
             w.authority_spec = spec;
         }
@@ -215,16 +225,16 @@ impl crate::app::Editor {
         &mut self,
         root: PathBuf,
         label: String,
-        authority: crate::services::authority::Authority,
+        connection: std::sync::Arc<crate::services::authority::Connection>,
     ) -> WindowId {
         let id = WindowId(self.next_window_id);
         self.next_window_id += 1;
 
         let mut resources = self.window_resources();
         resources.fs_manager = std::sync::Arc::new(crate::services::fs::FsManager::new(
-            std::sync::Arc::clone(&authority.filesystem),
+            std::sync::Arc::clone(&connection.authority.filesystem),
         ));
-        let mut session = Window::new(id, label, root.clone(), authority, resources);
+        let mut session = Window::new(id, label, root.clone(), connection, resources);
         session.terminal_width = self.terminal_width;
         session.terminal_height = self.terminal_height;
         let resolved_label = session.label.clone();
@@ -387,7 +397,15 @@ impl crate::app::Editor {
         resources.fs_manager = std::sync::Arc::new(crate::services::fs::FsManager::new(
             std::sync::Arc::clone(&window_authority.filesystem),
         ));
-        let mut session = Window::new(id, label, root.clone(), window_authority, resources);
+        let mut session = Window::new(
+            id,
+            label,
+            root.clone(),
+            std::sync::Arc::new(crate::services::authority::Connection::plain(
+                window_authority,
+            )),
+            resources,
+        );
         session.terminal_width = self.terminal_width;
         session.terminal_height = self.terminal_height;
         // Drop the placeholder now — everything above that reads through the
@@ -1625,7 +1643,7 @@ impl crate::app::Editor {
                 id,
                 descriptor.label.clone(),
                 root.clone(),
-                authority,
+                std::sync::Arc::new(crate::services::authority::Connection::plain(authority)),
                 resources,
                 &ws,
             ),
@@ -1634,7 +1652,7 @@ impl crate::app::Editor {
                     id,
                     descriptor.label.clone(),
                     root.clone(),
-                    authority,
+                    std::sync::Arc::new(crate::services::authority::Connection::plain(authority)),
                     resources,
                 );
                 w.seed_initial_layout();
@@ -1700,7 +1718,13 @@ impl crate::app::Editor {
         let id = WindowId(self.next_window_id);
         self.next_window_id += 1;
         let authority = self.local_session_authority(&root);
-        let mut window = Window::new(id, label, root, authority, self.window_resources());
+        let mut window = Window::new(
+            id,
+            label,
+            root,
+            std::sync::Arc::new(crate::services::authority::Connection::plain(authority)),
+            self.window_resources(),
+        );
         window.terminal_width = self.terminal_width;
         window.terminal_height = self.terminal_height;
         // Seed a layout so the renderer has a populated `splits` to paint
@@ -1759,7 +1783,7 @@ impl crate::app::Editor {
             id,
             descriptor.label.clone(),
             root,
-            authority,
+            std::sync::Arc::new(crate::services::authority::Connection::plain(authority)),
             self.window_resources(),
         );
         window.terminal_width = self.terminal_width;

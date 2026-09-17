@@ -3479,7 +3479,7 @@ impl Editor {
             // connection to the same host.
             let id = self.next_machine_id;
             self.next_machine_id += 1;
-            let info = Self::machine_info(&window.authority, id);
+            let info = Self::machine_info(&window.authority(), id);
             self.open_machines
                 .insert(id, super::OpenMachine::Window(window_id));
             self.plugin_manager
@@ -3577,7 +3577,7 @@ impl Editor {
         match self.open_machines.get(&id) {
             Some(super::OpenMachine::Owned(authority)) => Some(authority.as_ref()),
             Some(super::OpenMachine::Window(window)) => match self.windows.get(window) {
-                Some(window) => Some(&window.authority),
+                Some(window) => Some(&window.authority()),
                 // The window closed while the handle was open. Saying so beats
                 // quietly reading this machine instead of the one that is gone.
                 None => reject(format!("machine {id}'s window has closed")),

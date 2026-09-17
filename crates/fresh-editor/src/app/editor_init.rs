@@ -526,7 +526,9 @@ fn build_persisted_window_shells(
             id,
             ps.label.clone(),
             ps.root.clone(),
-            shell_authority,
+            std::sync::Arc::new(crate::services::authority::Connection::plain(
+                shell_authority,
+            )),
             shell_resources.clone(),
         );
         shell.terminal_width = width;
@@ -644,7 +646,6 @@ impl Editor {
             last_window_title: None,
             mode_registry: ModeRegistry::new(),
             pending_authority: None,
-            pending_keepalive: None,
             remote_indicator_override: None,
             menus: crate::config::MenuConfig::translated(),
             background_process_handles: HashMap::new(),
@@ -775,7 +776,9 @@ impl Editor {
         // constructed with the authority it runs under — production callers
         // that own a non-local authority pass it straight to
         // `with_working_dir_opts` instead.
-        let authority = Self::local_authority_with_filesystem(filesystem);
+        let connection = std::sync::Arc::new(crate::services::authority::Connection::plain(
+            Self::local_authority_with_filesystem(filesystem),
+        ));
         Self::with_working_dir_opts(
             config,
             width,
@@ -784,7 +787,7 @@ impl Editor {
             dir_context,
             plugins_enabled,
             color_capability,
-            authority,
+            connection,
             false,
         )
     }
@@ -805,7 +808,7 @@ impl Editor {
         dir_context: DirectoryContext,
         plugins_enabled: bool,
         color_capability: crate::view::color_support::ColorCapability,
-        authority: crate::services::authority::Authority,
+        connection: std::sync::Arc<crate::services::authority::Connection>,
         defer_plugin_load: bool,
     ) -> AnyhowResult<Self> {
         tracing::info!("Building default grammar registry...");
@@ -831,7 +834,7 @@ impl Editor {
             width,
             height,
             working_dir,
-            authority,
+            connection,
             plugins_enabled,
             true, // enable_embedded_plugins (production: always allow embedded fallback)
             dir_context,
@@ -879,13 +882,15 @@ impl Editor {
             &config.languages,
         );
         crate::config::reload_indent_overrides(&config.languages);
-        let authority = Self::local_authority_with_filesystem(filesystem);
+        let connection = std::sync::Arc::new(crate::services::authority::Connection::plain(
+            Self::local_authority_with_filesystem(filesystem),
+        ));
         let mut editor = Self::with_options(
             config,
             width,
             height,
             working_dir,
-            authority,
+            connection,
             enable_plugins,
             enable_embedded_plugins,
             dir_context,
@@ -930,7 +935,7 @@ impl Editor {
         width: u16,
         height: u16,
         working_dir: Option<PathBuf>,
-        authority: crate::services::authority::Authority,
+        connection: std::sync::Arc<crate::services::authority::Connection>,
         enable_plugins: bool,
         #[cfg_attr(not(feature = "embed-plugins"), allow(unused_variables))]
         enable_embedded_plugins: bool,
@@ -947,7 +952,7 @@ impl Editor {
         // the local spawner while the filesystem was already remote). The
         // filesystem is derived from it; the spawner/long-running/terminal
         // ride along on `self.authority`.
-        let filesystem = std::sync::Arc::clone(&authority.filesystem);
+        let filesystem = std::sync::Arc::clone(&connection.authority.filesystem);
         // Use provided time_source or default to RealTimeSource
         let time_source = time_source.unwrap_or_else(RealTimeSource::shared);
         tracing::info!("Editor::new called with width={}, height={}", width, height);
@@ -1162,7 +1167,7 @@ impl Editor {
         // already remote. Runtime authority transitions still go through the
         // destructive `install_authority` restart (principle 7), which
         // rebuilds the editor with the next authority via this same path.
-        let process_spawner = Arc::clone(&authority.process_spawner);
+        let process_spawner = Arc::clone(&connection.authority.process_spawner);
 
         // Initialize Quick Open registry with all providers
         let mut quick_open_registry = QuickOpenRegistry::new();
@@ -1386,17 +1391,18 @@ impl Editor {
         // downgrades an already-remote spec (e.g. a restored dormant session
         // booted on a local placeholder), since that path is `RemoteAgent` here.
         let active_authority_spec = match active_authority_spec {
-            crate::services::authority::SessionAuthoritySpec::Local => authority.session_spec(),
+            crate::services::authority::SessionAuthoritySpec::Local => {
+                connection.authority.session_spec()
+            }
             spec => spec,
         };
 
-        // The active window owns the editor's boot authority outright — moved
-        // in, not cloned (there is no editor-wide copy).
+        // The active window references the editor's boot connection.
         let mut active_win = crate::app::window::Window::new(
             active_window_id,
             active_label,
             active_root,
-            authority,
+            connection,
             base_resources.clone(),
         );
         // Seed the window's terminal dimensions from the editor's
