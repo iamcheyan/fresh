@@ -40,68 +40,6 @@ interface ProcessHandle<T> extends PromiseLike<T> {
 	/** Cancel/kill the operation. Returns true if cancelled, false if already completed */
 	kill(): Promise<boolean>;
 }
-/** One agent session discovered on a machine, from `editor.discoverAgentSessions()`. */
-interface AgentSession {
-	/** Unique across machines, tools and scans. */
-	key: {
-		machine: string;
-		tool: string;
-		id: string;
-	};
-	/** "agent-conversation", "agent-terminal" or "terminal". */
-	kind: string;
-	/** The coding agent ("claude", "codex", …), absent for a plain terminal. */
-	agent?: string;
-	/** The agent's own session id, as it would accept for `--resume`. */
-	resume_id?: string;
-	/** For a sub-agent, the conversation that spawned it. */
-	parent?: string;
-	is_subagent?: boolean;
-	title?: string;
-	git_branch?: string;
-	agent_version?: string;
-	pid?: number;
-	command?: string;
-	attached?: boolean;
-	/** The multiplexer or orchestrator that probably owns this session. */
-	owner: {
-		tool: string;
-		/** "multiplexer", "orchestrator" or "unhosted". */
-		kind: string;
-		display_name: string;
-		session?: string;
-		pane?: string;
-		workspace?: string;
-		/** "certain", "probable" or "possible" — how sure the ownership is. */
-		confidence: string;
-		reason?: string;
-	};
-	paths: {
-		cwd?: string;
-		transcript?: string;
-		workspace_root?: string;
-		repo?: string;
-		socket?: string;
-	};
-	/** Last known activity, unix seconds. What a list sorts on. */
-	last_active_unix?: number;
-	/** "certain", "probable" or "possible" — how much of this row to believe. */
-	confidence: string;
-}
-/** Result of `editor.discoverAgentSessions(machine, allowCommands)`. */
-interface AgentSessionScan {
-	/** The machine scanned. */
-	machine: string;
-	/** `{state: "reachable" | "unreachable" | "cancelled", error?: string}`. */
-	status: {
-		state: string;
-		error?: string;
-	};
-	/** Every session found, newest first. */
-	sessions: AgentSession[];
-	/** Non-fatal problems: an unreadable store, a truncated listing. */
-	problems: string[];
-}
 /** Buffer identifier */
 type BufferId = number;
 /** Split identifier */
@@ -3247,21 +3185,6 @@ interface EditorAPI {
 	* via `getAllCursors()`.
 	*/
 	getCursorLine(): number;
-	/**
-	* Discover the agent sessions other tools are running on this machine.
-	* 
-	* Resolves with `{machine, status, sessions, problems}` — one
-	* self-contained row per session, newest first. Runs off the editor
-	* thread, so a scan of a slow remote home directory does not stall the
-	* UI; see `fresh-agent-sessions`.
-	* 
-	* Both arguments are required — the runtime binds by arity. Pass `""`
-	* for `machine` to take the authority's own label, and `false` for
-	* `allowCommands` to keep discovery to pure filesystem reads, which
-	* covers every agent that writes a transcript. `true` additionally runs
-	* other tools' own listing commands (`tmux list-sessions` and friends).
-	*/
-	discoverAgentSessions(machine: string, allowCommands: boolean): Promise<AgentSessionScan>;
 	/**
 	* Get the byte offset of the start of a line (0-indexed line number)
 	* Returns null if the line number is out of range

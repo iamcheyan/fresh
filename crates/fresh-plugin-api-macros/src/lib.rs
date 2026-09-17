@@ -666,63 +666,6 @@ interface ProcessHandle<T> extends PromiseLike<T> {
   kill(): Promise<boolean>;
 }
 
-/** One agent session discovered on a machine, from `editor.discoverAgentSessions()`. */
-interface AgentSession {
-  /** Unique across machines, tools and scans. */
-  key: { machine: string; tool: string; id: string };
-  /** "agent-conversation", "agent-terminal" or "terminal". */
-  kind: string;
-  /** The coding agent ("claude", "codex", …), absent for a plain terminal. */
-  agent?: string;
-  /** The agent's own session id, as it would accept for `--resume`. */
-  resume_id?: string;
-  /** For a sub-agent, the conversation that spawned it. */
-  parent?: string;
-  is_subagent?: boolean;
-  title?: string;
-  git_branch?: string;
-  agent_version?: string;
-  pid?: number;
-  command?: string;
-  attached?: boolean;
-  /** The multiplexer or orchestrator that probably owns this session. */
-  owner: {
-    tool: string;
-    /** "multiplexer", "orchestrator" or "unhosted". */
-    kind: string;
-    display_name: string;
-    session?: string;
-    pane?: string;
-    workspace?: string;
-    /** "certain", "probable" or "possible" — how sure the ownership is. */
-    confidence: string;
-    reason?: string;
-  };
-  paths: {
-    cwd?: string;
-    transcript?: string;
-    workspace_root?: string;
-    repo?: string;
-    socket?: string;
-  };
-  /** Last known activity, unix seconds. What a list sorts on. */
-  last_active_unix?: number;
-  /** "certain", "probable" or "possible" — how much of this row to believe. */
-  confidence: string;
-}
-
-/** Result of `editor.discoverAgentSessions(machine, allowCommands)`. */
-interface AgentSessionScan {
-  /** The machine scanned. */
-  machine: string;
-  /** `{state: "reachable" | "unreachable" | "cancelled", error?: string}`. */
-  status: { state: string; error?: string };
-  /** Every session found, newest first. */
-  sessions: AgentSession[];
-  /** Non-fatal problems: an unreadable store, a truncated listing. */
-  problems: string[];
-}
-
 /** Buffer identifier */
 type BufferId = number;
 

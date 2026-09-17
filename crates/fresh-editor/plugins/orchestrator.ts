@@ -46,6 +46,11 @@ import {
   type WidgetSpec,
 } from "./lib/widgets.ts";
 import { BIG_FILE_ARGS } from "./lib/git_repo.ts";
+import {
+  hub,
+  type CollectedSession,
+  type ScanResult,
+} from "./lib/agent_scanner.ts";
 
 const editor = getEditor();
 
@@ -5544,7 +5549,7 @@ function runDockMenuOption(optKey: string): void {
   }
   if (optKey === "main:discover") {
     closeDockMenu();
-    discoverAgentSessions();
+    openAgentDiscovery();
     return;
   }
   // The settings flip in place and the menu stays up, so a second choice
@@ -9112,20 +9117,92 @@ interface DiscoverState {
 
 let discoverState: DiscoverState | null = null;
 
-/** Local first, then every configured machine. */
-function discoverMachines(): (Machine | null)[] {
-  return [null, ...loadMachines()];
+/** A machine the dialog can offer to scan. */
+interface DiscoverTarget {
+  key: string;
+  label: string;
+  /** The window whose authority the scan reads through, or null when this
+   *  machine has no open window and so cannot be read at all. */
+  window: number | null;
 }
 
-function discoverMachineLabel(m: Machine | null): string {
-  return m ? m.name : editor.t("machine.local");
+/** The ssh/kubernetes identity `m` attaches as — built the same way the create
+ *  path builds a session's `remote.detail`, so a configured machine can be
+ *  recognised among the windows that are already open. */
+function machineFacetKey(m: Machine): string {
+  if (m.kind === "kubernetes") return `kubernetes:${m.namespace}/${m.pod}`;
+  // `[user@]host[:port]`, and the facet carries no port.
+  const at = m.target.lastIndexOf("@");
+  const user = at >= 0 ? m.target.slice(0, at) : "";
+  let host = at >= 0 ? m.target.slice(at + 1) : m.target;
+  const bracketed = host.match(/^\[(.*)\]/);
+  if (bracketed) {
+    host = bracketed[1];
+  } else {
+    const colon = host.indexOf(":");
+    if (colon > 0) host = host.slice(0, colon);
+  }
+  return `ssh:${user ? `${user}@${host}` : host}`;
 }
 
-/** Group the flat session list by the tool that owns each row. */
-function discoverRowsFrom(scan: AgentSessionScan): DiscoverRow[] {
-  const groups = new Map<string, AgentSession[]>();
+/** One row per machine that has an open window — those are the ones whose
+ *  authority a scan can be read through — then every configured machine that
+ *  has none. The second group is listed rather than hidden so the dialog shows
+ *  the whole registry, but it is honest about not being able to read them. */
+function discoverTargets(): DiscoverTarget[] {
+  const active = editor.activeWindow();
+  const byMachine = new Map<string, DiscoverTarget>();
+  for (const s of orchestratorSessions.values()) {
+    // A discovered worktree or a pending placeholder carries a synthetic
+    // negative id and no window, so there is no authority to borrow.
+    if (s.id <= 0 || s.pending) continue;
+    const key = s.remote ? `${s.remote.kind}:${s.remote.detail}` : "local";
+    const label = s.remote ? `${s.remote.detail} · ${s.remote.kind}` : editor.t("machine.local");
+    const seen = byMachine.get(key);
+    // The active window wins, then the lowest id: re-opening the dialog on an
+    // unchanged editor offers the same window every time.
+    if (!seen || s.id === active || (seen.window !== active && s.id < seen.window!)) {
+      byMachine.set(key, { key, label, window: s.id });
+    }
+  }
+  // An editor with no orchestrator session still has an active window, and
+  // that window still has an authority worth scanning.
+  if (byMachine.size === 0) {
+    byMachine.set("active", {
+      key: "active",
+      label: editor.getAuthorityLabel() || editor.t("machine.local"),
+      window: active,
+    });
+  }
+  const targets = [...byMachine.values()].sort((a, b) => {
+    const aHere = a.key === "local" || a.key === "active";
+    const bHere = b.key === "local" || b.key === "active";
+    if (aHere !== bHere) return aHere ? -1 : 1;
+    return a.label.localeCompare(b.label);
+  });
+  for (const m of loadMachines()) {
+    if (byMachine.has(machineFacetKey(m))) continue;
+    targets.push({ key: `machine:${m.id}`, label: m.name, window: null });
+  }
+  return targets;
+}
+
+/** Group the flat session list by the tool that found each row, and end with
+ *  every problem the scan reported. */
+function discoverRowsFrom(scan: ScanResult): DiscoverRow[] {
+  const displayName = new Map(scan.tools.map((t) => [t.id, t.displayName]));
+  // Link endpoints are `tool/id`; either end of a link is a row some other
+  // tool also sees — a tmux pane and the transcript running inside it.
+  const linked = new Set<string>();
+  for (const l of scan.links) {
+    linked.add(l.host);
+    linked.add(l.hosted);
+  }
+
+  const groups = new Map<string, CollectedSession[]>();
   for (const session of scan.sessions) {
-    const owner = session.owner.display_name;
+    const tool = session.tool ?? "";
+    const owner = displayName.get(tool) ?? tool;
     const bucket = groups.get(owner);
     if (bucket) bucket.push(session);
     else groups.set(owner, [session]);
@@ -9145,15 +9222,37 @@ function discoverRowsFrom(scan: AgentSessionScan): DiscoverRow[] {
       detail: editor.t("discover.group_count", { count: String(sessions.length) }),
     });
     for (const session of sessions) {
-      const agent = session.agent ? String(session.agent) : "—";
-      const where = session.paths.cwd ?? "";
+      // `||`, not `??`: the hub already resolved a non-empty title (its own,
+      // else the cwd's basename, else the id), and if that ever regresses an
+      // empty string must not render as a blank row.
+      const title = session.title || session.id;
+      const mark = session.attached
+        ? "● "
+        : linked.has(`${session.tool}/${session.id}`)
+          ? "↔ "
+          : "  ";
       rows.push({
-        key: `session:${session.key.machine}/${session.key.tool}/${session.key.id}`,
+        key: `session:${session.tool}/${session.id}`,
         group: false,
-        label: `${agent}  ${session.title ?? editor.pathBasename(where) ?? session.key.id}`,
-        detail: where,
+        label: `${mark}${title}`,
+        detail: session.cwd ?? "",
       });
     }
+  }
+
+  // Every problem, not just the first. A scan that half-worked has to say
+  // which half: a tool skipped because its store could not be read is
+  // otherwise indistinguishable from a tool that is not installed.
+  if (scan.problems.length > 0) {
+    rows.push({
+      key: "group:problems",
+      group: true,
+      label: editor.t("discover.problems", { count: String(scan.problems.length) }),
+      detail: "",
+    });
+    scan.problems.forEach((problem, i) => {
+      rows.push({ key: `problem:${i}`, group: false, label: problem, detail: "" });
+    });
   }
   return rows;
 }
@@ -9174,20 +9273,31 @@ function discoverRowEntry(r: DiscoverRow): TextPropertyEntry {
 
 function buildDiscoverSpec(): WidgetSpec {
   const st = discoverState!;
-  const machines = discoverMachines();
+  const targets = discoverTargets();
+  const selectedIndex = Math.min(st.machineIndex, targets.length - 1);
+  const selected = targets[selectedIndex] ?? null;
+  // A machine with no open window has no authority to read through. Saying so
+  // beside the picker beats leaving Scan looking like it would work.
+  const unreachable = selected !== null && selected.window === null;
   const rows = st.rows ?? [];
 
   const body: WidgetSpec[] = [
-    dropdown(machines.map(discoverMachineLabel), {
-      selectedIndex: Math.min(st.machineIndex, machines.length - 1),
-      label: editor.t("discover.machine"),
-      labelWidth: FORM_LABEL_W,
-      key: "discover-machine",
-    }),
+    dropdown(
+      targets.map((t) => t.label),
+      {
+        selectedIndex,
+        label: editor.t("discover.machine"),
+        labelWidth: FORM_LABEL_W,
+        key: "discover-machine",
+      },
+    ),
     spacer(0),
   ];
 
-  if (st.note) body.push(fieldNote(st.note), spacer(0));
+  const note = unreachable
+    ? editor.t("discover.not_attached", { machine: selected.label })
+    : st.note;
+  if (note) body.push(fieldNote(note), spacer(0));
 
   if (st.scanning) {
     body.push(label(editor.t("dock.discover_running")));
@@ -9214,7 +9324,7 @@ function buildDiscoverSpec(): WidgetSpec {
         button(editor.t("discover.btn_scan"), {
           intent: "primary",
           key: "discover-scan",
-          disabled: st.scanning,
+          disabled: st.scanning || unreachable,
         }),
         "⏎",
       ),
@@ -9259,17 +9369,32 @@ function closeDiscoverDialog(): void {
 // The scan runs off the editor thread, so this awaits rather than blocking
 // the dialog: a slow remote home directory shows the pending line and then
 // the tree.
+//
+// Every scanner lives in a plugin; this asks the `agent-sessions` hub, which
+// opens the machine, runs each registered scanner against it and closes the
+// handle again. Nothing here knows what a tmux socket or a Codex rollout is.
 async function runDiscoverScan(): Promise<void> {
   const st = discoverState;
   if (!st || st.scanning) return;
-  const machine = discoverMachines()[st.machineIndex] ?? null;
+  const target = discoverTargets()[st.machineIndex] ?? null;
+  if (!target) return;
 
-  // Only the machine this session is already attached to can be scanned:
-  // reading another one means connecting to it first, which is the machines
-  // dialog's job. Saying so beats scanning the wrong host and labelling the
-  // result with the right one's name.
-  if (machine !== null) {
-    st.note = editor.t("discover.not_attached", { machine: machine.name });
+  // Reading a machine means reading it through a window that is already
+  // connected to it; opening that connection is the machines dialog's job.
+  if (target.window === null) {
+    st.note = editor.t("discover.not_attached", { machine: target.label });
+    st.rows = [];
+    refreshDiscoverDialog();
+    return;
+  }
+
+  const api = hub();
+  if (!api) {
+    // Should not happen — the hub ships with the editor — but a missing hub
+    // must read as a failed scan rather than an empty machine.
+    st.note = editor.t("dock.discover_failed", {
+      error: "the agent-sessions plugin is not loaded",
+    });
     st.rows = [];
     refreshDiscoverDialog();
     return;
@@ -9279,16 +9404,16 @@ async function runDiscoverScan(): Promise<void> {
   st.note = "";
   refreshDiscoverDialog();
   try {
-    const scan = await editor.discoverAgentSessions("", true);
+    const scan = await api.scan(
+      { kind: "window", window: target.window },
+      { allowCommands: true },
+    );
     st.scanning = false;
-    if (scan.status.state !== "reachable") {
-      st.rows = [];
-      st.note = editor.t("dock.discover_unreachable", { machine: scan.machine });
-    } else {
-      st.rows = discoverRowsFrom(scan);
-      st.index = 0;
-      st.note = scan.problems.length > 0 ? scan.problems[0] : "";
-    }
+    // The rows carry the problems, so there is no note to write: a scan that
+    // reached the machine at all has something to say about every tool.
+    st.rows = discoverRowsFrom(scan);
+    st.index = 0;
+    st.note = "";
   } catch (err) {
     st.scanning = false;
     st.rows = [];
@@ -9297,7 +9422,7 @@ async function runDiscoverScan(): Promise<void> {
   refreshDiscoverDialog();
 }
 
-function discoverAgentSessions(): void {
+function openAgentDiscovery(): void {
   openDiscoverDialog();
 }
 
@@ -15630,7 +15755,7 @@ editor.registerCommand("%cmd.reload_rules", "%cmd.reload_rules_desc", "orchestra
   terminalBypass: true,
 });
 
-registerHandler("orchestrator_discover_sessions", discoverAgentSessions);
+registerHandler("orchestrator_discover_sessions", openAgentDiscovery);
 editor.registerCommand(
   "%cmd.discover_sessions",
   "%cmd.discover_sessions_desc",

@@ -356,6 +356,7 @@
     "discover.hint": "Изберете машина и натиснете „Сканиране“.",
     "discover.empty": "Няма намерени сесии на агенти.",
     "discover.group_count": "%{count} сесии",
+    "discover.problems": "Проблеми (%{count})",
     "discover.not_attached": "%{machine} не е свързана с тази сесия — първо я отворете от „Машини“, след това сканирайте."
   },
   "cs": {
@@ -715,6 +716,7 @@
     "discover.hint": "Vyberte počítač a zvolte „Prohledat“.",
     "discover.empty": "Nebyly nalezeny žádné relace agentů.",
     "discover.group_count": "%{count} relací",
+    "discover.problems": "Potíže (%{count})",
     "discover.not_attached": "%{machine} není připojen k této relaci — nejprve jej otevřete v „Počítače“ a poté prohledejte."
   },
   "de": {
@@ -1074,6 +1076,7 @@
     "discover.hint": "Rechner wählen und „Suchen“ auswählen.",
     "discover.empty": "Keine Agent-Sitzungen gefunden.",
     "discover.group_count": "%{count} Sitzung(en)",
+    "discover.problems": "Probleme (%{count})",
     "discover.not_attached": "%{machine} ist mit dieser Sitzung nicht verbunden — zuerst unter „Rechner“ öffnen, dann suchen."
   },
   "en": {
@@ -1433,6 +1436,7 @@
     "discover.hint": "Pick a machine and choose Scan.",
     "discover.empty": "No agent sessions found.",
     "discover.group_count": "%{count} session(s)",
+    "discover.problems": "Problems (%{count})",
     "discover.not_attached": "%{machine} is not attached to this session — open it from Machines first, then scan."
   },
   "es": {
@@ -1792,6 +1796,7 @@
     "discover.hint": "Elija una máquina y seleccione «Analizar».",
     "discover.empty": "No se encontraron sesiones de agente.",
     "discover.group_count": "%{count} sesión(es)",
+    "discover.problems": "Problemas (%{count})",
     "discover.not_attached": "%{machine} no está conectada a esta sesión: ábrala desde Máquinas y luego analice."
   },
   "fr": {
@@ -2151,6 +2156,7 @@
     "discover.hint": "Choisissez une machine puis « Analyser ».",
     "discover.empty": "Aucune session d’agent trouvée.",
     "discover.group_count": "%{count} session(s)",
+    "discover.problems": "Problèmes (%{count})",
     "discover.not_attached": "%{machine} n’est pas rattachée à cette session — ouvrez-la depuis Machines, puis analysez."
   },
   "it": {
@@ -2510,6 +2516,7 @@
     "discover.hint": "Scegli una macchina e seleziona «Analizza».",
     "discover.empty": "Nessuna sessione agente trovata.",
     "discover.group_count": "%{count} sessioni",
+    "discover.problems": "Problemi (%{count})",
     "discover.not_attached": "%{machine} non è collegata a questa sessione: aprila da Macchine e poi analizza."
   },
   "ja": {
@@ -2869,6 +2876,7 @@
     "discover.hint": "マシンを選んで「スキャン」を実行します。",
     "discover.empty": "エージェントセッションは見つかりませんでした。",
     "discover.group_count": "%{count} 件",
+    "discover.problems": "問題 (%{count})",
     "discover.not_attached": "%{machine} はこのセッションに接続されていません。先に「マシン」から開いてからスキャンしてください。"
   },
   "ko": {
@@ -3228,6 +3236,7 @@
     "discover.hint": "컴퓨터를 선택하고 “검색”을 누르세요.",
     "discover.empty": "에이전트 세션을 찾지 못했습니다.",
     "discover.group_count": "%{count}개",
+    "discover.problems": "문제 (%{count})",
     "discover.not_attached": "%{machine}이(가) 이 세션에 연결되어 있지 않습니다 — 먼저 “컴퓨터”에서 연 다음 검색하세요."
   },
   "pt-BR": {
@@ -3587,6 +3596,7 @@
     "discover.hint": "Escolha uma máquina e selecione “Analisar”.",
     "discover.empty": "Nenhuma sessão de agente encontrada.",
     "discover.group_count": "%{count} sessão(ões)",
+    "discover.problems": "Problemas (%{count})",
     "discover.not_attached": "%{machine} não está conectada a esta sessão — abra-a em Máquinas e depois analise."
   },
   "ru": {
@@ -3946,6 +3956,7 @@
     "discover.hint": "Выберите машину и нажмите «Сканировать».",
     "discover.empty": "Сессии агентов не найдены.",
     "discover.group_count": "сессий: %{count}",
+    "discover.problems": "Проблемы (%{count})",
     "discover.not_attached": "%{machine} не подключена к этой сессии — сначала откройте её в разделе «Машины», затем сканируйте."
   },
   "th": {
@@ -4305,6 +4316,7 @@
     "discover.hint": "เลือกเครื่องแล้วกด “สแกน”",
     "discover.empty": "ไม่พบเซสชันเอเจนต์",
     "discover.group_count": "%{count} เซสชัน",
+    "discover.problems": "ปัญหา (%{count})",
     "discover.not_attached": "%{machine} ยังไม่ได้เชื่อมต่อกับเซสชันนี้ — เปิดจาก “เครื่อง” ก่อน แล้วจึงสแกน"
   },
   "uk": {
@@ -4664,6 +4676,7 @@
     "discover.hint": "Виберіть машину та натисніть «Сканувати».",
     "discover.empty": "Сесій агентів не знайдено.",
     "discover.group_count": "сесій: %{count}",
+    "discover.problems": "Проблеми (%{count})",
     "discover.not_attached": "%{machine} не під’єднана до цієї сесії — спочатку відкрийте її в розділі «Машини», потім скануйте."
   },
   "vi": {
@@ -5023,6 +5036,7 @@
     "discover.hint": "Chọn một máy rồi bấm “Quét”.",
     "discover.empty": "Không tìm thấy phiên tác nhân nào.",
     "discover.group_count": "%{count} phiên",
+    "discover.problems": "Sự cố (%{count})",
     "discover.not_attached": "%{machine} chưa được gắn vào phiên này — hãy mở từ “Máy” trước, rồi quét."
   },
   "zh-CN": {
@@ -5382,6 +5396,7 @@
     "discover.hint": "选择一台机器，然后点击“扫描”。",
     "discover.empty": "未发现代理会话。",
     "discover.group_count": "%{count} 个会话",
+    "discover.problems": "问题 (%{count})",
     "discover.not_attached": "%{machine} 未连接到当前会话 — 请先从“机器”中打开，然后再扫描。"
   }
 }

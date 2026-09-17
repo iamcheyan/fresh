@@ -1251,6 +1251,26 @@ pub async fn connect_ssh_authority(
     ))
 }
 
+/// The platform an authority's machine runs, as a plugin sees it.
+///
+/// Read from the authority's own backend descriptor, not guessed from a
+/// display string: `session_spec` is what actually knows whether this is the
+/// local host or something reached over a transport.
+pub fn platform_label(authority: &Authority) -> &'static str {
+    match authority.session_spec() {
+        SessionAuthoritySpec::Local => match std::env::consts::OS {
+            "macos" => "macos",
+            "windows" => "windows",
+            "linux" => "linux",
+            _ => "other",
+        },
+        // Everything reached over a transport is unix-shaped. The one
+        // platform-specific question a plugin asks — where desktop apps keep
+        // their support directories — is only answerable locally anyway.
+        _ => "linux",
+    }
+}
+
 /// Error from translating a plugin payload into a live authority.
 /// Reserved for future kinds that might fail to construct (e.g. invalid
 /// connection parameters); local-only payloads currently never fail.
