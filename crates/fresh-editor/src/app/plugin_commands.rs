@@ -3514,8 +3514,10 @@ impl Editor {
         let id = self.next_machine_id;
         self.next_machine_id += 1;
         let info = Self::machine_info(&authority, id);
+        let connection =
+            self.open_connection(crate::services::authority::Connection::plain(authority));
         self.open_machines
-            .insert(id, super::OpenMachine::Owned(Arc::new(authority)));
+            .insert(id, super::OpenMachine::Owned(connection));
         self.plugin_manager
             .read()
             .unwrap()
@@ -3532,6 +3534,9 @@ impl Editor {
         callback_id: fresh_core::api::JsCallbackId,
     ) {
         let was_open = self.open_machines.remove(&machine).is_some();
+        // The handle's reference is gone; close the connection unless a window
+        // or another handle is still sharing it.
+        self.prune_connections();
         self.plugin_manager
             .read()
             .unwrap()
@@ -3570,7 +3575,7 @@ impl Editor {
             None
         };
         match self.open_machines.get(&id) {
-            Some(super::OpenMachine::Owned(authority)) => Some(authority.as_ref()),
+            Some(super::OpenMachine::Owned(connection)) => Some(&connection.authority),
             Some(super::OpenMachine::Window(window)) => match self.windows.get(window) {
                 Some(window) => Some(&window.authority()),
                 // The window closed while the handle was open. Saying so beats

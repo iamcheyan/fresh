@@ -630,3 +630,58 @@ fn activating_env_does_not_restart_the_editor() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// The connection registry is the editor's whole answer to "what machines am I
+/// talking to?" — not a walk over the windows plus whatever handles a plugin is
+/// holding. A window built after boot registers its connection; closing it
+/// closes that connection and nothing else.
+#[test]
+fn every_window_connection_is_registered_and_closing_one_closes_it() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut harness = EditorTestHarness::create(
+        100,
+        30,
+        HarnessOptions::new().with_working_dir(temp.path().to_path_buf()),
+    )?;
+
+    // Boot: one window, so one connection, and the registry knows about it
+    // even though that window was built before the registry existed.
+    assert_eq!(
+        harness.editor_mut().open_connection_count(),
+        1,
+        "the boot window's connection is adopted into the registry"
+    );
+
+    let second_root = temp.path().join("second");
+    std::fs::create_dir_all(&second_root)?;
+    let second = harness
+        .editor_mut()
+        .create_window_at(second_root, "second".into());
+    assert_eq!(
+        harness.editor_mut().open_connection_count(),
+        2,
+        "a new window opens its own connection rather than sharing the boot one"
+    );
+
+    // Swapping a window's backend replaces its connection; the old one has no
+    // references left, so the next prune closes it.
+    harness
+        .editor_mut()
+        .set_session_authority(second, container_authority("Container:second"));
+    assert!(harness
+        .editor_mut()
+        .open_connection_labels()
+        .contains(&"Container:second".to_string()));
+
+    assert!(
+        harness.editor_mut().close_window(second),
+        "the second window closes"
+    );
+    assert_eq!(
+        harness.editor_mut().open_connection_count(),
+        1,
+        "closing the window closed its connection, and only its connection"
+    );
+    assert_eq!(harness.editor_mut().open_connection_labels(), vec!["local"]);
+    Ok(())
+}

@@ -476,9 +476,8 @@ impl Editor {
     /// handle, terminal PTY, plugin state, and in-flight task is
     /// dropped cleanly by the existing restart machinery.
     pub fn install_authority(&mut self, authority: crate::services::authority::Authority) {
-        self.pending_authority = Some(std::sync::Arc::new(
-            crate::services::authority::Connection::plain(authority),
-        ));
+        self.pending_authority =
+            Some(self.open_connection(crate::services::authority::Connection::plain(authority)));
         // Re-open the same working directory; `main.rs` picks up the
         // pending authority from the old editor just before dropping it.
         self.request_restart(self.working_dir().to_path_buf());
@@ -505,7 +504,7 @@ impl Editor {
         // dir), a remote-agent attach must re-root the editor at the pod-side
         // workspace — otherwise the explorer, quick-open, and open-file all
         // operate on the local host path, which doesn't exist in the pod.
-        self.pending_authority = Some(std::sync::Arc::new(
+        self.pending_authority = Some(self.open_connection(
             crate::services::authority::Connection {
                 authority,
                 keepalive: std::sync::Mutex::new(Some(keepalive)),
@@ -572,20 +571,15 @@ impl Editor {
         let mut installs: Vec<(
             fresh_core::WindowId,
             std::sync::Arc<crate::services::authority::Connection>,
-        )> = bg_roots
-            .into_iter()
-            .map(|(id, root)| {
-                (
-                    id,
-                    std::sync::Arc::new(crate::services::authority::Connection::plain(
-                        crate::services::authority::Authority::local_scoped(
-                            self.session_scope_for(&root),
-                        ),
-                    )),
-                )
-            })
-            .collect();
-        installs.push((active_id, connection));
+        )> = Vec::with_capacity(bg_roots.len() + 1);
+        for (id, root) in bg_roots {
+            let scope = self.session_scope_for(&root);
+            let connection = self.open_connection(crate::services::authority::Connection::plain(
+                crate::services::authority::Authority::local_scoped(scope),
+            ));
+            installs.push((id, connection));
+        }
+        installs.push((active_id, self.adopt_connection(connection)));
         // Re-point each window's LSP backend, then give the window its
         // connection. Each is its own — background windows never reference the
         // active one's.
@@ -687,6 +681,7 @@ impl Editor {
         window_id: fresh_core::WindowId,
         connection: std::sync::Arc<crate::services::authority::Connection>,
     ) {
+        let connection = self.adopt_connection(connection);
         let is_active = self.active_window == window_id;
         if let Some(w) = self.windows.get_mut(&window_id) {
             // Re-point this window's LSP backend, then hand the window the
@@ -715,6 +710,79 @@ impl Editor {
                     crate::services::plugins::hooks::HookArgs::AuthorityChanged { label },
                 );
             }
+        }
+    }
+
+    /// How many connections this editor has open — every window's and every
+    /// plugin machine handle's, counted once each however many of them share
+    /// it. The registry is the whole answer.
+    pub fn open_connection_count(&self) -> usize {
+        self.connections.len()
+    }
+
+    /// The display label of every open connection, sorted. `local` stands in
+    /// for the unlabelled local one.
+    pub fn open_connection_labels(&self) -> Vec<String> {
+        let mut labels: Vec<String> = self
+            .connections
+            .iter()
+            .map(|(_, c)| {
+                let label = c.authority.display_label.clone();
+                if label.is_empty() {
+                    "local".to_string()
+                } else {
+                    label
+                }
+            })
+            .collect();
+        labels.sort();
+        labels
+    }
+
+    /// Open a connection: register it and hand back the reference to store.
+    ///
+    /// Every connection a window or a machine handle holds comes from here or
+    /// from [`Self::adopt_connection`], so the registry really is the set of
+    /// machines this editor is talking to.
+    pub(crate) fn open_connection(
+        &mut self,
+        connection: crate::services::authority::Connection,
+    ) -> std::sync::Arc<crate::services::authority::Connection> {
+        self.connections.register(connection).1
+    }
+
+    /// Register a connection built before this editor existed — the boot
+    /// connection, or one carried across a rebuild. Registering the same one
+    /// twice is a no-op that returns the entry already open.
+    pub(crate) fn adopt_connection(
+        &mut self,
+        connection: std::sync::Arc<crate::services::authority::Connection>,
+    ) -> std::sync::Arc<crate::services::authority::Connection> {
+        self.connections.share(connection).1
+    }
+
+    /// Every window's connection, registered. Windows built before the editor
+    /// existed — the boot window, and the dormant shells restored from disk —
+    /// hold connections the registry has not seen; this is where it learns
+    /// about them.
+    pub(crate) fn adopt_existing_window_connections(&mut self) {
+        let held: Vec<_> = self
+            .windows
+            .values()
+            .map(|w| std::sync::Arc::clone(&w.connection))
+            .collect();
+        for connection in held {
+            self.connections.share(connection);
+        }
+    }
+
+    /// Close the connections nothing refers to any more. Called where
+    /// references are known to have been released — a window closing, a
+    /// machine handle closing.
+    pub(crate) fn prune_connections(&mut self) {
+        let closed = self.connections.prune();
+        if closed > 0 {
+            tracing::debug!("closed {closed} connection(s) nothing was using");
         }
     }
 
@@ -784,7 +852,7 @@ impl Editor {
     pub fn take_active_authority(
         &mut self,
     ) -> std::sync::Arc<crate::services::authority::Connection> {
-        let placeholder = std::sync::Arc::new(crate::services::authority::Connection::plain(
+        let placeholder = self.open_connection(crate::services::authority::Connection::plain(
             crate::services::authority::Authority::local(
                 std::sync::Arc::new(crate::services::workspace_trust::WorkspaceTrust::permissive()),
                 std::sync::Arc::new(crate::services::env_provider::EnvProvider::inactive()),

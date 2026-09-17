@@ -478,14 +478,23 @@ pub struct PerfCounters {
 /// genuinely remote machine is to borrow the authority of a window already
 /// attached to it.
 pub(crate) enum OpenMachine {
-    /// Built here from a plugin payload, and dropped when the handle closes.
-    Owned(Arc<crate::services::authority::Authority>),
-    /// A window's own authority, borrowed. Resolved on each use rather than
-    /// cloned, so a handle never outlives the window it names.
+    /// Built here from a plugin payload. A reference into the connection
+    /// registry like any other, so closing the handle releases it and the
+    /// registry closes the connection once nothing else is reading it.
+    Owned(Arc<crate::services::authority::Connection>),
+    /// A window's own connection, borrowed. Resolved on each use rather than
+    /// cloned, so a handle never outlives the window it names and sees that
+    /// window's reconnects.
     Window(fresh_core::WindowId),
 }
 
 pub struct Editor {
+    /// Every connection this editor has open, and the only owner of any of
+    /// them. Windows and plugin machine handles hold references into it, so a
+    /// machine two of them are using is one entry with two borrowers rather
+    /// than two connections to the same host. See
+    /// [`crate::services::authority::ConnectionRegistry`].
+    pub(crate) connections: crate::services::authority::ConnectionRegistry,
     /// Machines a plugin opened with `openMachine`, by handle id.
     ///
     /// The editor's own "where" is a window's authority; these are authorities

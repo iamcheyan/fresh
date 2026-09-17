@@ -1282,6 +1282,9 @@ pub enum AuthorityPayloadError {
 
 mod docker_spawner;
 mod kube_spawner;
+mod registry;
+
+pub use registry::{ConnectionId, ConnectionRegistry};
 
 pub(crate) use kube_spawner::KubectlLongRunningSpawner;
 

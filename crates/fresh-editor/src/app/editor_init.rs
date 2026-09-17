@@ -589,6 +589,7 @@ impl Editor {
             terminal_width: parts.terminal_width,
             terminal_height: parts.terminal_height,
             last_layout_signature: None,
+            connections: crate::services::authority::ConnectionRegistry::new(),
             open_machines: std::collections::HashMap::new(),
             next_machine_id: 1,
             tokio_runtime: parts.tokio_runtime,
@@ -1575,6 +1576,12 @@ impl Editor {
             .copied()
             .filter(|id| *id != editor.active_window)
             .collect();
+
+        // The boot window and the dormant shells restored from disk were built
+        // before the editor — and so before its connection registry — existed.
+        // Register what they hold, so from here on the registry is every
+        // connection this editor has open.
+        editor.adopt_existing_window_connections();
 
         // Where the panes are, before anything asks: a terminal opened before
         // the first frame is sized to its pane, and the snapshot below

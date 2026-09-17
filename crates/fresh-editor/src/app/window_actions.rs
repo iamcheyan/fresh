@@ -227,6 +227,7 @@ impl crate::app::Editor {
         label: String,
         connection: std::sync::Arc<crate::services::authority::Connection>,
     ) -> WindowId {
+        let connection = self.adopt_connection(connection);
         let id = WindowId(self.next_window_id);
         self.next_window_id += 1;
 
@@ -389,6 +390,7 @@ impl crate::app::Editor {
         // whether the active authority actually changed and skip the
         // hook/snapshot churn when it didn't.
         let previous_authority_label = self.authority().display_label.clone();
+        let connection = self.adopt_connection(connection);
 
         let mut resources = self.window_resources();
         // Re-derive the window's `fs_manager` from *its* backend's filesystem
@@ -1490,6 +1492,10 @@ impl crate::app::Editor {
             .unwrap()
             .run_hook("window_closed", HookArgs::WindowClosed { id: id.0 });
 
+        // The window's reference is gone, so its connection is closable unless
+        // another window or a machine handle is still sharing it.
+        self.prune_connections();
+
         true
     }
 
@@ -1603,6 +1609,7 @@ impl crate::app::Editor {
         id: WindowId,
         connection: std::sync::Arc<crate::services::authority::Connection>,
     ) {
+        let connection = self.adopt_connection(connection);
         let Some(descriptor) = self.dormant_remote.remove(&id) else {
             // Raced with a close / a second connect — nothing to promote, and
             // dropping the connection closes the carrier we just opened.
@@ -1704,13 +1711,10 @@ impl crate::app::Editor {
         let id = WindowId(self.next_window_id);
         self.next_window_id += 1;
         let authority = self.local_session_authority(&root);
-        let mut window = Window::new(
-            id,
-            label,
-            root,
-            std::sync::Arc::new(crate::services::authority::Connection::plain(authority)),
-            self.window_resources(),
-        );
+        let connection =
+            self.open_connection(crate::services::authority::Connection::plain(authority));
+        let resources = self.window_resources();
+        let mut window = Window::new(id, label, root, connection, resources);
         window.terminal_width = self.terminal_width;
         window.terminal_height = self.terminal_height;
         // Seed a layout so the renderer has a populated `splits` to paint
@@ -1759,26 +1763,28 @@ impl crate::app::Editor {
         let Some(descriptor) = self.dormant_remote.get(&id) else {
             return;
         };
+        // Everything this needs from the descriptor, copied out before the
+        // registry below borrows `self` mutably.
         let root = descriptor.root.clone();
+        let label = descriptor.label.clone();
+        let plugin_state = descriptor.plugin_state.clone();
+        let authority_spec = descriptor.authority_spec.clone();
         // Same per-session local scope a boot-discovered local shell gets:
         // its own trust + env handles, never a clone of the previous
         // window's. Routed through the blessed factory so this shell inherits
         // the worktree→repo trust keying too.
         let authority = self.local_session_authority(&root);
-        let mut window = Window::new(
-            id,
-            descriptor.label.clone(),
-            root,
-            std::sync::Arc::new(crate::services::authority::Connection::plain(authority)),
-            self.window_resources(),
-        );
+        let connection =
+            self.open_connection(crate::services::authority::Connection::plain(authority));
+        let resources = self.window_resources();
+        let mut window = Window::new(id, label, root, connection, resources);
         window.terminal_width = self.terminal_width;
         window.terminal_height = self.terminal_height;
-        window.plugin_state = descriptor.plugin_state.clone();
+        window.plugin_state = plugin_state;
         // Keep the backend identity so the status bar / dock present the
         // session as its real (not-yet-connected) backend and a retry knows
         // what to reconnect to — never downgraded to local.
-        window.authority_spec = descriptor.authority_spec.clone();
+        window.authority_spec = authority_spec;
         // The shell renders as a placeholder page (see
         // `render_dormant_shell_page`), not as an editable buffer — nothing
         // can be meaningfully edited before the backend connects. Seed the
