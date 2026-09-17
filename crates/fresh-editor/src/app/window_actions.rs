@@ -126,6 +126,8 @@ impl crate::app::Editor {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| root.to_string_lossy().into_owned());
+            // `create_window_with_authority` always produces a window, and that
+            // window is the connection's holder from here on.
             let id = self.create_window_with_authority(root, label, connection);
             self.set_active_window(id);
             return id;
@@ -137,9 +139,6 @@ impl crate::app::Editor {
         if self.active_window != existing {
             self.set_active_window(existing);
         }
-        // The connection this window was on has no references left unless
-        // another window was sharing it.
-        self.prune_connections();
         existing
     }
 
@@ -1606,8 +1605,10 @@ impl crate::app::Editor {
                 // `create_window_with_terminal` already rolled the active
                 // pointer back to the previous window and left the
                 // editor-wide authority untouched (it never installed the
-                // remote one). The connection was moved into the failed
-                // creation and dropped with it, tearing down the carrier.
+                // remote one). No window holds the connection now, and the
+                // registry's own reference is not enough to keep a carrier
+                // open for a session that does not exist.
+                self.prune_connections();
                 Err(e)
             }
         }

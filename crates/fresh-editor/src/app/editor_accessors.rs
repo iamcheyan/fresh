@@ -686,6 +686,11 @@ impl Editor {
             lsp.set_workspace_trust(authority.workspace_trust.clone());
             w.connection = connection;
         }
+        // The window let go of whatever it was on. Close that connection
+        // unless another window or a machine handle is still sharing it —
+        // here rather than at the call sites, so no caller can forget and
+        // leave a carrier open for a backend nothing is using.
+        self.prune_connections();
         if is_active {
             // The active backend *is* this window's authority now — re-point
             // quick-open's file provider at it (same stale-capture fix).

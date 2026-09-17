@@ -662,10 +662,12 @@ fn every_window_connection_is_registered_and_closing_one_closes_it() -> anyhow::
     harness
         .editor_mut()
         .set_session_authority(second, container_authority("Container:second"));
-    assert!(harness
-        .editor_mut()
-        .open_connection_labels()
-        .contains(&"Container:second".to_string()));
+    assert_eq!(
+        harness.editor_mut().open_connection_labels(),
+        vec!["Container:second", "local"],
+        "the window's old connection closed when it let go of it — swapping a \
+         backend must not leave the previous one open"
+    );
 
     assert!(
         harness.editor_mut().close_window(second),
