@@ -2,16 +2,16 @@
 //!
 //! Every primitive the editor exposes — file I/O, integrated terminal,
 //! plugin `spawnProcess`, formatter, LSP server spawn, file watcher,
-//! find-in-files, save, recovery — routes through the active `Authority`.
-//! There is exactly one authority per `Editor` at any moment.
+//! find-in-files, save, recovery — routes through the authority of the
+//! window it belongs to. Each window has exactly one, and the editor-wide
+//! `authority()` is the active window's.
 //!
-//! Transitions are atomic and destructive: `Editor::install_authority`
-//! queues the replacement, then piggy-backs on the existing
-//! `request_restart` flow so the whole `Editor` is dropped and rebuilt
-//! around the new authority. Every cached `Arc<dyn FileSystem>`, LSP
-//! handle, terminal PTY, plugin state, and in-flight task goes away
-//! with the old `Editor`; there is no in-place swap and no half-
-//! transitioned window. See `docs/internal/AUTHORITY_DESIGN.md`.
+//! A transition lands in a window: `Editor::install_authority` attaches the
+//! new backend to the window showing that project — re-pointing the one
+//! already there, or opening one — and every other window keeps the machine
+//! it was on. This used to drop and rebuild the whole `Editor`; see
+//! `docs/internal/remote-authority-trust.md` §1.4 for why it no longer has
+//! to.
 //!
 //! Authority is opaque to core code. The four fields below are the
 //! entire contract; nothing else inspects whether the backend is local,
@@ -912,9 +912,9 @@ pub struct RemoteAgentSpec {
     #[serde(default)]
     pub base_env: Vec<(String, String)>,
     /// When true, attach as a **new window** (born-attached, coexisting with
-    /// existing windows) instead of the default global restart. The
-    /// Orchestrator sets this so a cloud session is a real session row rather
-    /// than retargeting the whole editor.
+    /// existing windows) rather than re-pointing the window at the workspace
+    /// root. The Orchestrator sets this so a cloud session is a real session
+    /// row of its own.
     #[serde(default)]
     pub window: bool,
     /// Window label (used only when `window` is true). Empty falls back to the
@@ -998,7 +998,7 @@ impl RemoteAgentSpec {
 /// connection (its `kubectl exec` child + heartbeat task) and the
 /// reconnect task. The editor parks this in its session-keepalive slot —
 /// the same one SSH uses for its `SshConnection` — so the agent channel
-/// survives the editor rebuild on attach. Dropping it tears the session
+/// lives as long as the connection does. Dropping it tears the session
 /// down (reconnect aborted, then the connection's carrier killed).
 pub struct KubeKeepalive {
     // Drop runs the explicit `Drop` below first (aborting reconnect), then
@@ -1007,11 +1007,10 @@ pub struct KubeKeepalive {
     reconnect: tokio::task::JoinHandle<()>,
     _connection: KubeConnection,
     // The load-bearing field: the dedicated runtime the agent channel +
-    // heartbeat + reconnect tasks run on. Owned here so they survive the editor
-    // restart the attach triggers — the editor's per-instance runtime is
-    // dropped during that rebuild, and if the channel rode *that* runtime its
-    // I/O tasks would die the instant the attach completed ("Channel closed"
-    // on every file op). SSH's `RemoteSession._runtime` does exactly this.
+    // heartbeat + reconnect tasks run on. Owned here rather than borrowed from
+    // the editor's per-instance runtime, which dies with the editor: if the
+    // channel rode *that* runtime its I/O tasks would go with it ("Channel
+    // closed" on every file op). SSH's `RemoteSession._runtime` does the same.
     _runtime: tokio::runtime::Runtime,
 }
 
@@ -1027,10 +1026,9 @@ impl Drop for KubeKeepalive {
 /// The K8s counterpart to SSH's `connect_remote`: bootstraps the agent
 /// ([`KubeConnection::connect`]) and the reconnect/heartbeat tasks **on a
 /// dedicated runtime owned by the returned keepalive** — *not* the caller's
-/// runtime. Installing the authority restarts the editor, dropping the
-/// editor's per-instance runtime; binding the channel there would kill it the
-/// moment the attach completes (regression: `agent_channel_survives_dropping_
-/// the_attach_runtime`). `base_env` is the captured in-pod env probe applied to
+/// runtime. The editor's per-instance runtime dies with the editor; binding
+/// the channel there would take the connection with it (regression:
+/// `agent_channel_survives_dropping_the_attach_runtime`). `base_env` is the captured in-pod env probe applied to
 /// LSP spawns and `command_exists`.
 ///
 /// Stays `async` for callers, but the bootstrap needs `block_on` (which can't
@@ -1132,7 +1130,8 @@ impl Drop for SshKeepalive {
 /// [`SshKeepalive`] that must be parked to keep it alive — the runtime-owned,
 /// reusable counterpart to `main.rs`'s boot-time `connect_remote`, mirroring
 /// [`connect_kube_authority`]. The agent channel + reconnect run on a dedicated
-/// runtime returned in the keepalive so they survive editor rebuilds.
+/// runtime returned in the keepalive, so they outlive the editor that opened
+/// the connection.
 ///
 /// `remote_dir` is the directory the integrated terminal roots at (the
 /// `ssh -t … 'cd <dir>; …'` wrapper); filesystem/process ops carry absolute

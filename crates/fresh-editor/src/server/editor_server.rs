@@ -105,26 +105,23 @@ pub struct EditorServer {
     /// submitted, so its `ScriptResult` is written when the outcome arrives
     /// rather than at dispatch time.
     pending_commands: std::collections::HashMap<u64, u64>,
-    /// Current authority. Carried across editor rebuilds so plugin-
-    /// installed authorities (e.g. a devcontainer attach) survive the
-    /// restart-based transition: the old editor is dropped, a new one
-    /// is built with this authority in effect, and clients stay
-    /// connected the whole time. Starts as
-    /// `config.startup_authority.unwrap_or_else(Authority::local)`.
+    /// The connection the daemon boots its editor on —
+    /// `config.startup_authority.unwrap_or_else(Authority::local)`, so a
+    /// `fresh ssh://…` daemon comes up already attached. Moved into the
+    /// editor when it is built; from then on the editor's own registry owns
+    /// every connection and this holds the local placeholder left behind.
     current_authority: std::sync::Arc<crate::services::authority::Connection>,
     /// Workspace Trust state, gating process execution. Held here (not on
-    /// the `Editor`) so the chosen level survives editor rebuilds. Shared
-    /// by `Arc` into the authority's guarding spawners on every build via
-    /// `Authority::with_trust`; its root is updated when the working
-    /// directory changes.
+    /// the `Editor`) so the daemon owns the chosen level. Shared by `Arc`
+    /// into the authority's guarding spawners via `Authority::with_trust`;
+    /// its root is updated when the working directory changes.
     workspace_trust: Arc<crate::services::workspace_trust::WorkspaceTrust>,
-    /// Live env provider, shared into the authority's spawners across rebuilds.
+    /// Live env provider, shared into the authority's spawners.
     env_provider: Arc<crate::services::env_provider::EnvProvider>,
-    /// Keepalive bundle paired with the startup authority — held for
-    /// the server's lifetime so SSH runtimes, reconnect tasks, and
-    /// similar resources outlive the editor rebuilds that happen on
-    /// authority transitions.  Never inspected; dropped only when the
-    /// server is dropped.
+    /// Keepalive bundle paired with the startup authority — held for the
+    /// server's lifetime so SSH runtimes, reconnect tasks and similar
+    /// resources outlive whatever the editor does with the connection.
+    /// Never inspected; dropped only when the server is dropped.
     #[allow(dead_code)]
     session_keepalive: Option<Box<dyn std::any::Any + Send>>,
     /// The hosted web bridge (`config.web_addr`), bound in `run` once the
@@ -808,11 +805,10 @@ impl EditorServer {
             self.config.dir_context.clone(),
             self.config.plugins_enabled,
             color_capability,
-            // Move the current connection into the rebuilt editor, leaving a
-            // local placeholder behind. A real authority transition
-            // overwrites it just below; otherwise
-            // each window's own backend spec drives restore/reconnect, so the
-            // placeholder only governs the active window until it reconnects.
+            // Move the boot connection into the editor, leaving a local
+            // placeholder behind — `Authority` is non-`Clone`, so it is given
+            // up rather than copied. From here each window's own backend spec
+            // drives restore and reconnect.
             std::mem::replace(
                 &mut self.current_authority,
                 std::sync::Arc::new(crate::services::authority::Connection::plain(

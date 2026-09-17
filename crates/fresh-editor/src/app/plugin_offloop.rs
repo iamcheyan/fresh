@@ -40,7 +40,7 @@ use crate::services::runtime::LiveRuntime;
 /// runtime being dropped is the only thing that stops an in-flight
 /// `grepProject`: keep it here and a project-wide grep would carry on against
 /// a filesystem and an `async_bridge` nobody is reading, one request timeout
-/// per file, holding the old runtime's threads alive across an editor rebuild.
+/// per file, holding a dropped runtime's threads alive.
 /// The runtime is passed to the entry points below instead, which is all that
 /// is needed to prove it is alive at the moment of spawning.
 pub(crate) struct OffLoop {
