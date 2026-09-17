@@ -541,10 +541,11 @@ interface FreshMachine {
   run(program: string, args?: string[], cwd?: string): Promise<CommandResult>;
   /** Environment variables, for the names that are set.
    *
-   *  Answers only for a local machine, where the editor's own environment is
-   *  that machine's. A remote one reports nothing rather than this computer's
-   *  values, so a scanner falls back to default locations instead of reading
-   *  the wrong disk. */
+   *  A local machine answers from the editor's own environment, which is that
+   *  machine's. A remote one is asked, with `printenv` over its transport.
+   *  Never this computer's values for another machine: a machine with no
+   *  `printenv` reports nothing, so a scanner falls back to the store's
+   *  default location instead of reading the wrong disk. */
   env(names: string[]): Promise<Record<string, string>>;
   /** Idempotent: closing twice is not an error. */
   close(): Promise<boolean>;
@@ -617,7 +618,8 @@ interface EditorAPI {
   /** Run a command on the active window's authority — over a remote
    *  one it runs there, unlike `spawnHostProcess`. */
   runOnTarget(program: string, args?: string[], cwd?: string): Promise<CommandResult>;
-  /** Environment variables from the active window's authority; local only. */
+  /** Environment variables from the active window's authority. Local: the
+   *  editor's own. Remote: read with `printenv` over its transport. */
   machineEnv(names: string[]): Promise<Record<string, string>>;
 }
 

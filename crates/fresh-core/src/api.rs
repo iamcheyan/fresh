@@ -5664,12 +5664,15 @@ pub enum PluginCommand {
     ///
     /// Resolves with a name→value map holding only the names that are set.
     ///
-    /// Answers only for a *local* authority, where the editor's own
-    /// environment is that machine's. A remote machine's environment is not
-    /// readable without running a command there, so every name comes back
-    /// missing rather than filled in from this computer — a scanner told that
-    /// `CODEX_HOME` points somewhere would go and read the wrong machine's
-    /// disk and label the result with the right one's name.
+    /// A *local* authority answers from the editor's own environment, which is
+    /// that machine's. A remote one is asked — `printenv`, run over its
+    /// transport, off the editor thread — because its environment is not
+    /// knowable from here. What never happens is filling a remote answer in
+    /// from this computer: a scanner told that `CODEX_HOME` points somewhere
+    /// would go and read the wrong machine's disk and label the result with
+    /// the right one's name. A machine with no `printenv` reports nothing,
+    /// which is what an unset variable reports too, so a scanner falls back to
+    /// the store's default location.
     MachineEnv {
         machine: Option<u64>,
         names: Vec<String>,

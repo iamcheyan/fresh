@@ -1866,8 +1866,10 @@ impl JsEditorApi {
 
     /// Read environment variables from a machine.
     ///
-    /// Resolves with a map holding only the names that are set. A remote
-    /// machine reports nothing rather than this computer's values.
+    /// Resolves with a map holding only the names that are set — never this
+    /// computer's values for another machine. A local machine answers from the
+    /// editor's own environment; a remote one is asked, by running `printenv`
+    /// there, and reports nothing if it has no `printenv`.
     #[plugin_api(
         async_promise,
         js_name = "_machineEnvOn",

@@ -255,6 +255,84 @@ pub(crate) fn run_on_target(runtime: &LiveRuntime, cap: OffLoop, req: RunOnTarge
     });
 }
 
+/// One `machineEnv` request that has to leave the editor thread: the machine is
+/// remote, so its environment is only knowable by asking it.
+pub(crate) struct RemoteEnvRequest {
+    pub names: Vec<String>,
+    pub spawner: Arc<dyn crate::services::remote::ProcessSpawner>,
+    pub callback_id: JsCallbackId,
+}
+
+/// Read environment variables from a remote machine by running `printenv`
+/// there.
+///
+/// `printenv` with no arguments rather than one call per name: a spawn over a
+/// remote transport is a round trip, and a scanner asks about a handful of
+/// variables at once. POSIX guarantees `printenv`; a machine without it
+/// reports nothing, which is the same answer a variable that is not set gives
+/// and leaves scanners on their default locations.
+///
+/// Values containing newlines cannot be told from two variables in this
+/// format, so a line without `=` is treated as a continuation of the previous
+/// value rather than dropped.
+pub(crate) fn remote_env(runtime: &LiveRuntime, cap: OffLoop, req: RemoteEnvRequest) {
+    runtime.spawn(async move {
+        let RemoteEnvRequest {
+            names,
+            spawner,
+            callback_id,
+        } = req;
+
+        let result = match spawner
+            .spawn("printenv".to_string(), Vec::new(), None)
+            .await
+        {
+            Ok(out) if out.exit_code == 0 => {
+                Ok(serde_json::Value::Object(parse_printenv(&out.stdout, &names)).to_string())
+            }
+            // No `printenv`, or it failed: report nothing rather than guessing.
+            Ok(_) | Err(_) => Ok(serde_json::Value::Object(serde_json::Map::new()).to_string()),
+        };
+        cap.settle(callback_id, result);
+    });
+}
+
+/// Pick `names` out of `printenv` output.
+///
+/// A line without `=` is a newline *inside* the previous variable's value, not
+/// a malformed entry: `printenv` writes values verbatim, so the format cannot
+/// distinguish them and dropping such a line would silently truncate a value.
+fn parse_printenv(stdout: &str, names: &[String]) -> serde_json::Map<String, serde_json::Value> {
+    let wanted: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
+    let mut found = serde_json::Map::new();
+    // The variable the last `name=value` line named, if we kept it — the one a
+    // continuation line belongs to.
+    let mut open: Option<String> = None;
+    for line in stdout.lines() {
+        match line.split_once('=') {
+            Some((name, value)) if wanted.contains(name) => {
+                found.insert(
+                    name.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+                open = Some(name.to_string());
+            }
+            // A variable we were not asked about: its continuation lines are
+            // not ours either.
+            Some(_) => open = None,
+            None => {
+                if let Some(name) = open.as_ref() {
+                    if let Some(serde_json::Value::String(v)) = found.get_mut(name) {
+                        v.push('\n');
+                        v.push_str(line);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
 /// Editor-thread-collected inputs for a project grep. Everything here is a
 /// snapshot: the piece tree is not `Send`, so dirty buffers are captured as
 /// `HybridSearchPlan`s while still on the editor thread.
@@ -783,5 +861,52 @@ mod tests {
             err.contains("superseded"),
             "the error should say why: {err}"
         );
+    }
+
+    use super::parse_printenv;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn only_the_names_asked_for_come_back() {
+        let out = parse_printenv(
+            "HOME=/root\nCODEX_HOME=/srv/codex\nPATH=/usr/bin\n",
+            &names(&["CODEX_HOME", "HOME"]),
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out["CODEX_HOME"], "/srv/codex");
+        assert_eq!(out["HOME"], "/root");
+    }
+
+    #[test]
+    fn a_name_that_is_not_set_is_absent_rather_than_empty() {
+        let out = parse_printenv("HOME=/root\n", &names(&["CODEX_HOME"]));
+        assert!(out.is_empty(), "an unset variable is not reported at all");
+    }
+
+    #[test]
+    fn a_value_with_an_equals_sign_keeps_it() {
+        let out = parse_printenv("FLAGS=-Dfoo=bar\n", &names(&["FLAGS"]));
+        assert_eq!(out["FLAGS"], "-Dfoo=bar", "only the first `=` separates");
+    }
+
+    #[test]
+    fn a_newline_inside_a_value_is_part_of_it() {
+        // `printenv` writes values verbatim, so this is indistinguishable from
+        // two variables in the output — and truncating it would be worse.
+        let out = parse_printenv(
+            "SCRIPT=line one\nline two\nHOME=/root\n",
+            &names(&["SCRIPT", "HOME"]),
+        );
+        assert_eq!(out["SCRIPT"], "line one\nline two");
+        assert_eq!(out["HOME"], "/root");
+    }
+
+    #[test]
+    fn a_continuation_of_a_variable_we_skipped_is_not_attached_to_the_last_kept_one() {
+        let out = parse_printenv("HOME=/root\nOTHER=first\nstray\n", &names(&["HOME"]));
+        assert_eq!(out["HOME"], "/root", "the stray line belongs to OTHER");
     }
 }

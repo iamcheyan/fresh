@@ -3602,18 +3602,40 @@ impl Editor {
             return;
         };
 
-        let mut found = serde_json::Map::new();
+        // A local machine's environment is this process's own, so it is a map
+        // lookup and answers on the editor thread.
         if matches!(authority.session_spec(), SessionAuthoritySpec::Local) {
+            let mut found = serde_json::Map::new();
             for name in names {
                 if let Ok(value) = std::env::var(&name) {
                     found.insert(name, serde_json::Value::String(value));
                 }
             }
+            self.plugin_manager
+                .read()
+                .unwrap()
+                .resolve_callback(callback_id, serde_json::Value::Object(found).to_string());
+            return;
         }
-        self.plugin_manager
-            .read()
-            .unwrap()
-            .resolve_callback(callback_id, serde_json::Value::Object(found).to_string());
+
+        // A remote one has to be asked, which is a spawn over its transport —
+        // so it leaves the editor thread like every other remote read. This
+        // used to report nothing at all, which left a scanner reading default
+        // locations even when the machine relocated its store with a variable.
+        let filesystem = authority.filesystem.clone();
+        let spawner = authority.process_spawner.clone();
+        let Some((runtime, sender)) = self.off_loop_parts(callback_id) else {
+            return;
+        };
+        super::plugin_offloop::remote_env(
+            &runtime,
+            super::plugin_offloop::OffLoop { filesystem, sender },
+            super::plugin_offloop::RemoteEnvRequest {
+                names,
+                spawner,
+                callback_id,
+            },
+        );
     }
 
     /// Hand a subtree walk to the off-loop worker.
