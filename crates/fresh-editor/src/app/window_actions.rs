@@ -133,9 +133,9 @@ impl crate::app::Editor {
             return id;
         };
         self.set_session_connection(existing, connection);
-        // The terminals in this window were running on the machine it has just
-        // left; respawn them through the one it is on now.
-        self.reattach_window(existing);
+        // The terminals in this window are running on the machine it has just
+        // left — alive, but in the wrong place. Move them, scrollback and all.
+        self.move_window_terminals_to_its_authority(existing);
         if self.active_window != existing {
             self.set_active_window(existing);
         }

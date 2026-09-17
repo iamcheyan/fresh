@@ -1101,14 +1101,16 @@ impl Editor {
     /// Either way the embedded terminal PTYs died with the old carrier (a
     /// separate `ssh -t` / `kubectl exec` from the agent channel), so we respawn
     /// them in place through the now-live authority, reusing each backing file
-    /// so scrollback continues. `respawn_terminals_through_authority` skips
-    /// still-live terminals, so this is idempotent under duplicate signals.
+    /// so scrollback continues. Still-live terminals are skipped, so this is
+    /// idempotent under duplicate signals — an authority *change* wants
+    /// [`Self::move_window_terminals_to_its_authority`] instead, which moves
+    /// the live ones too.
     pub(crate) fn reattach_window(&mut self, window_id: fresh_core::WindowId) {
         let Some(window) = self.windows.get_mut(&window_id) else {
             return;
         };
         window.remote_reconnect_error = None;
-        let revived = window.respawn_terminals_through_authority();
+        let revived = window.respawn_terminals_through_authority(false);
         if revived > 0 {
             let label = window.label.clone();
             self.set_status_message(format!("Reconnected: {label}"));
@@ -1121,6 +1123,35 @@ impl Editor {
             // brings it back live in place. Only the active window owns the
             // `terminal_mode` / `key_context` input state; a background window
             // re-syncs when the user next focuses it.
+            if window_id == self.active_window {
+                self.sync_terminal_mode_to_active_buffer();
+            }
+        }
+    }
+
+    /// Move a window's terminals onto the machine its authority now names.
+    ///
+    /// After an authority *change* — a devcontainer attach, a detach back to
+    /// local — the PTYs are still alive on the machine the window has left. A
+    /// reconnect can leave a live terminal alone because it is the same machine
+    /// either way; this cannot, or the window would hold a shell running
+    /// somewhere it no longer is. Each respawn reuses the terminal's backing
+    /// file, so scrollback continues across the move rather than starting
+    /// blank — which the editor rebuild this replaced could not do at all.
+    pub(crate) fn move_window_terminals_to_its_authority(
+        &mut self,
+        window_id: fresh_core::WindowId,
+    ) {
+        let Some(window) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        window.remote_reconnect_error = None;
+        let moved = window.respawn_terminals_through_authority(true);
+        if moved > 0 {
+            let label = window.label.clone();
+            tracing::info!("moved {moved} terminal(s) in window {window_id} ({label})");
+            // The active window owns the terminal-mode input state; a
+            // background one re-syncs when the user next focuses it.
             if window_id == self.active_window {
                 self.sync_terminal_mode_to_active_buffer();
             }

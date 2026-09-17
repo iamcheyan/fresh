@@ -1122,17 +1122,21 @@ impl Window {
     /// through `Authority::terminal_command`, so the new PTY runs on the remote
     /// backend by construction — never the local host.
     ///
-    /// Only terminals whose handle is missing or no longer alive are respawned;
-    /// a still-live terminal is left untouched (respawning it would orphan its
-    /// PTY). Terminal ids change on respawn — the manager allocates fresh ones —
+    /// `include_live` decides what counts as needing a respawn. A reconnect
+    /// passes `false`: the PTYs died with the carrier, a still-live one is a
+    /// duplicate signal, and respawning it would orphan its PTY. An authority
+    /// *change* passes `true`: those terminals are alive on the machine this
+    /// window has just left, and leaving them would put a host shell inside a
+    /// container window, running somewhere the window no longer is.
+    ///
+    /// Terminal ids change on respawn — the manager allocates fresh ones —
     /// so every terminal-id-keyed entry (buffer→terminal binding, backing/log
     /// files, launch/resume commands, ephemeral marker) is remapped to the new
     /// id and the dead handle is torn down.
     ///
-    /// Returns the number of terminals actually revived (dead handles that were
-    /// respawned), so callers can tailor a status message and skip it when the
-    /// window had no terminals to restore.
-    pub fn respawn_terminals_through_authority(&mut self) -> usize {
+    /// Returns how many terminals were respawned, so callers can tailor a
+    /// status message and skip it when there was nothing to move.
+    pub fn respawn_terminals_through_authority(&mut self, include_live: bool) -> usize {
         // Snapshot the (buffer, old terminal id) pairs up front — the loop
         // mutates `terminal_buffers` as it remaps ids.
         let bindings: Vec<(BufferId, TerminalId)> = self
@@ -1143,9 +1147,8 @@ impl Window {
 
         let mut revived = 0usize;
         for (buffer_id, old_id) in bindings {
-            // Leave a still-live terminal alone; only revive the dead ones.
             let handle = self.terminal_manager.get(old_id);
-            if handle.is_some_and(|h| h.is_alive()) {
+            if !include_live && handle.is_some_and(|h| h.is_alive()) {
                 continue;
             }
 
